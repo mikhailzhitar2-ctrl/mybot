@@ -883,7 +883,9 @@ async def process_with_claude(user_id, message_text):
             messages=history
         )
 
-    reply = remove_markdown(response.content[0].text)
+    # Берём первый текстовый блок (могут быть tool_use блоки)
+    reply_text = next((b.text for b in response.content if hasattr(b, "text")), "")
+    reply = remove_markdown(reply_text) if reply_text else "Готово."
     history.append({"role": "assistant", "content": reply})
 
     # Сохраняем историю в Redis
