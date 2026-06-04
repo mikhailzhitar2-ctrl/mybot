@@ -19,7 +19,88 @@ GOOGLE_CALENDAR_ID = os.environ["GOOGLE_CALENDAR_ID"]
 TODOIST_API_KEY = os.environ["TODOIST_API_KEY"]
 TAVILY_API_KEY = os.environ["TAVILY_API_KEY"]
 
+import redis
+import json
+
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+# Redis для хранения истории и долгосрочной памяти
+REDIS_URL = os.environ.get("REDIS_URL", "")
+redis_client = None
+if REDIS_URL:
+    try:
+        redis_client = redis.from_url(
+            REDIS_URL,
+            decode_responses=True,
+            socket_connect_timeout=3,
+            socket_timeout=3,
+            retry_on_timeout=False
+        )
+        redis_client.ping()
+        print("Redis подключён")
+    except Exception as e:
+        print(f"Redis недоступен, используем память: {e}")
+        redis_client = None
+
+def redis_get_history(user_id):
+    if not redis_client:
+        return user_histories.get(user_id, [])
+    try:
+        data = redis_client.get(f"history:{user_id}")
+        return json.loads(data) if data else []
+    except Exception as e:
+        print(f"[Redis] get_history error: {e}")
+        return user_histories.get(user_id, [])
+
+def redis_save_history(user_id, history):
+    if not redis_client:
+        user_histories[user_id] = history
+        return
+    try:
+        redis_client.setex(f"history:{user_id}", 604800, json.dumps(history[-30:], ensure_ascii=False))
+    except Exception as e:
+        print(f"[Redis] save_history error: {e}")
+        user_histories[user_id] = history
+
+def redis_get_memory(user_id):
+    if not redis_client:
+        return ""
+    try:
+        data = redis_client.get(f"memory:{user_id}")
+        return data if data else ""
+    except Exception as e:
+        print(f"[Redis] get_memory error: {e}")
+        return ""
+
+def redis_save_memory(user_id, memory_text):
+    if not redis_client:
+        return
+    try:
+        redis_client.set(f"memory:{user_id}", memory_text)
+    except Exception as e:
+        print(f"[Redis] save_memory error: {e}")
+
+async def extract_and_save_memory(user_id, conversation_summary):
+    """Claude выделяет важные факты из разговора и добавляет в память."""
+    try:
+        existing = redis_get_memory(user_id)
+        prompt = (
+            f"Существующая память о пользователе:\n{existing}\n\n"
+            f"Новый разговор:\n{conversation_summary}\n\n"
+            f"Выдели новые важные факты, договорённости, предпочтения, планы которые стоит запомнить. "
+            f"Объедини с существующей памятью, убери дубли и устаревшее. "
+            f"Формат: короткие факты, каждый с новой строки. Максимум 50 строк. "
+            f"Отвечай только фактами, без вступлений."
+        )
+        response = client.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=1000,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        new_memory = response.content[0].text.strip()
+        redis_save_memory(user_id, new_memory)
+    except Exception as e:
+        print(f"Ошибка сохранения памяти: {e}")
 
 def remove_markdown(text):
     text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
@@ -602,14 +683,18 @@ def compose_outgoing_message(recipient_name: str, recipient_username: str, conte
     return f"Составляю сообщение для {recipient_name}..."
 
 async def process_with_claude(user_id, message_text):
-    if user_id not in user_histories:
-        user_histories[user_id] = []
-
     tz = pytz.timezone("Europe/Moscow")
     now = datetime.now(tz)
     today_date = now.strftime("%Y-%m-%d")
     tomorrow_date = (now + timedelta(days=1)).strftime("%Y-%m-%d")
     weekdays = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
+
+    # Загружаем историю из Redis
+    history = redis_get_history(user_id)
+
+    # Загружаем долгосрочную память
+    long_memory = redis_get_memory(user_id)
+    memory_block = f"\n\nДОЛГОСРОЧНАЯ ПАМЯТЬ (факты о Михаиле из прошлых разговоров):\n{long_memory}" if long_memory else ""
 
     calendar_context = ""
     if any(kw in message_text.lower() for kw in ["завтра", "план на завтра"]):
@@ -618,17 +703,16 @@ async def process_with_claude(user_id, message_text):
         calendar_context = "\n\n" + get_today_events()
 
     full_msg = f"{message_text}\n\n[Сегодня: {today_date} ({weekdays[now.weekday()]}). Завтра: {tomorrow_date}]{calendar_context}"
-    user_histories[user_id].append({"role": "user", "content": full_msg})
+    history.append({"role": "user", "content": full_msg})
 
-    if len(user_histories[user_id]) > 20:
-        user_histories[user_id] = user_histories[user_id][-20:]
+    system_with_memory = SYSTEM_PROMPT + memory_block
 
     response = client.messages.create(
         model="claude-sonnet-4-5",
         max_tokens=2000,
-        system=SYSTEM_PROMPT,
+        system=system_with_memory,
         tools=TOOLS,
-        messages=user_histories[user_id]
+        messages=history
     )
 
     while response.stop_reason == "tool_use":
@@ -673,16 +757,29 @@ async def process_with_claude(user_id, message_text):
                     result = "Неизвестный инструмент"
                 tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": result})
 
-        user_histories[user_id].append({"role": "assistant", "content": response.content})
-        user_histories[user_id].append({"role": "user", "content": tool_results})
+        history.append({"role": "assistant", "content": response.content})
+        history.append({"role": "user", "content": tool_results})
         response = client.messages.create(
             model="claude-sonnet-4-5", max_tokens=2000,
-            system=SYSTEM_PROMPT, tools=TOOLS,
-            messages=user_histories[user_id]
+            system=system_with_memory, tools=TOOLS,
+            messages=history
         )
 
     reply = remove_markdown(response.content[0].text)
-    user_histories[user_id].append({"role": "assistant", "content": reply})
+    history.append({"role": "assistant", "content": reply})
+
+    # Сохраняем историю в Redis
+    redis_save_history(user_id, history)
+
+    # Каждые 10 сообщений обновляем долгосрочную память
+    if len(history) % 10 == 0:
+        summary = "\n".join([
+            f"{m['role']}: {m['content'] if isinstance(m['content'], str) else '[tool]'}"
+            for m in history[-10:]
+        ])
+        import asyncio
+        asyncio.create_task(extract_and_save_memory(user_id, summary))
+
     return reply
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -695,7 +792,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/tasks — задачи из Todoist\n"
         "/clear — сбросить историю\n"
         "/review — еженедельный GTD-обзор\n"
-        "/todoist_check — диагностика Todoist\n\n"
+        "/todoist_check — диагностика Todoist\n"
+        "/memory — показать долгосрочную память\n"
+        "/forget — очистить долгосрочную память\n\n"
         "Пишешь или говоришь — я здесь."
     )
 
@@ -825,8 +924,33 @@ async def todoist_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Ошибка диагностики: {e}")
 
 async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_histories[update.effective_user.id] = []
+    user_id = update.effective_user.id
+    user_histories[user_id] = []
+    if redis_client:
+        try:
+            redis_client.delete(f"history:{user_id}")
+        except:
+            pass
     await update.message.reply_text("История очищена.")
+
+async def memory(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать долгосрочную память."""
+    user_id = update.effective_user.id
+    mem = redis_get_memory(user_id)
+    if mem:
+        await update.message.reply_text(f"🧠 Долгосрочная память:\n\n{mem}")
+    else:
+        await update.message.reply_text("Долгосрочная память пока пуста.")
+
+async def forget(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Очистить долгосрочную память."""
+    user_id = update.effective_user.id
+    if redis_client:
+        try:
+            redis_client.delete(f"memory:{user_id}")
+        except:
+            pass
+    await update.message.reply_text("🧠 Долгосрочная память очищена.")
 
 async def review(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -845,6 +969,8 @@ def main():
     app.add_handler(CommandHandler("clear", clear))
     app.add_handler(CommandHandler("todoist_check", todoist_check))
     app.add_handler(CommandHandler("review", review))
+    app.add_handler(CommandHandler("memory", memory))
+    app.add_handler(CommandHandler("forget", forget))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     print("Бот запущен...")
