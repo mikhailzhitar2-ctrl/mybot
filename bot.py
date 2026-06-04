@@ -103,6 +103,82 @@ def get_week_events():
     except Exception as ex:
         return f"Ошибка: {ex}"
 
+def get_free_blocks(date_str, work_start="09:00", work_end="22:00", min_block_minutes=60):
+    """Возвращает свободные блоки в расписании на дату."""
+    try:
+        service = get_calendar_service()
+        tz = pytz.timezone("Europe/Moscow")
+        dt = tz.localize(datetime.strptime(date_str, "%Y-%m-%d"))
+
+        # Границы рабочего дня
+        day_start = dt.replace(hour=int(work_start.split(":")[0]), minute=int(work_start.split(":")[1]), second=0, microsecond=0)
+        day_end = dt.replace(hour=int(work_end.split(":")[0]), minute=int(work_end.split(":")[1]), second=0, microsecond=0)
+
+        result = service.events().list(
+            calendarId=GOOGLE_CALENDAR_ID,
+            timeMin=day_start.isoformat(),
+            timeMax=day_end.isoformat(),
+            singleEvents=True, orderBy="startTime"
+        ).execute()
+        events = result.get("items", [])
+
+        # Строим занятые интервалы
+        busy = []
+        for e in events:
+            s = e["start"].get("dateTime")
+            en = e["end"].get("dateTime")
+            if s and en:
+                busy.append((
+                    datetime.fromisoformat(s).astimezone(tz),
+                    datetime.fromisoformat(en).astimezone(tz)
+                ))
+        busy.sort(key=lambda x: x[0])
+
+        # Ищем свободные блоки
+        free_blocks = []
+        cursor = day_start
+        for b_start, b_end in busy:
+            if b_start > cursor:
+                gap_minutes = int((b_start - cursor).total_seconds() / 60)
+                if gap_minutes >= min_block_minutes:
+                    free_blocks.append({
+                        "from": cursor.strftime("%H:%M"),
+                        "to": b_start.strftime("%H:%M"),
+                        "minutes": gap_minutes
+                    })
+            cursor = max(cursor, b_end)
+
+        # Остаток после последнего события
+        if cursor < day_end:
+            gap_minutes = int((day_end - cursor).total_seconds() / 60)
+            if gap_minutes >= min_block_minutes:
+                free_blocks.append({
+                    "from": cursor.strftime("%H:%M"),
+                    "to": day_end.strftime("%H:%M"),
+                    "minutes": gap_minutes
+                })
+
+        return free_blocks
+    except Exception as ex:
+        return []
+
+def plan_day(date_str):
+    """Возвращает полную картину дня: события + свободные блоки."""
+    events_text, events = get_events_for_date(date_str)
+    free_blocks = get_free_blocks(date_str)
+
+    text = events_text + "\n"
+    if free_blocks:
+        text += "\n⏳ Свободные блоки:\n"
+        for b in free_blocks:
+            hours = b["minutes"] // 60
+            mins = b["minutes"] % 60
+            duration = f"{hours}ч {mins}м" if hours else f"{mins}м"
+            text += f"• {b['from']} – {b['to']} ({duration})\n"
+    else:
+        text += "\nСвободных блоков нет — день плотный."
+    return text
+
 def add_event(summary, date_str, time_str, duration_hours=1):
     try:
         service = get_calendar_service()
@@ -176,40 +252,63 @@ def add_todoist_task(content, priority="p3", due_date=None):
     except Exception as ex:
         return f"Ошибка: {ex}"
 
+def find_todoist_task(tasks, task_name):
+    """Ищет задачу: точное совпадение → один substring. Защита от ложных матчей."""
+    name_lower = task_name.lower().strip()
+    for t in tasks:
+        if t["content"].lower().strip() == name_lower:
+            return t
+    matches = [t for t in tasks if name_lower in t["content"].lower()]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        names = ", ".join('"' + t["content"] + '"' for t in matches[:5])
+        return {"error": f"Найдено несколько задач: {names}. Уточни название."}
+    return None
+
 def complete_todoist_task(task_name):
     try:
         tasks = httpx.get(f"{TODOIST_BASE}/tasks", headers=TODOIST_HEADERS, timeout=10).json()
-        for t in tasks:
-            if task_name.lower() in t["content"].lower():
-                httpx.post(f"{TODOIST_BASE}/tasks/{t['id']}/close", headers=TODOIST_HEADERS, timeout=10)
-                return f"✅ Выполнено: {t['content']}"
-        return f"Задача не найдена: {task_name}"
+        t = find_todoist_task(tasks, task_name)
+        if t is None:
+            return f"Задача не найдена: {task_name}"
+        if "error" in t:
+            return t["error"]
+        httpx.post(f"{TODOIST_BASE}/tasks/{t['id']}/close", headers=TODOIST_HEADERS, timeout=10)
+        return f"✅ Выполнено: {t['content']}"
     except Exception as ex:
         return f"Ошибка: {ex}"
 
 def delete_todoist_task(task_name):
     try:
         tasks = httpx.get(f"{TODOIST_BASE}/tasks", headers=TODOIST_HEADERS, timeout=10).json()
-        for t in tasks:
-            if task_name.lower() in t["content"].lower():
-                httpx.delete(f"{TODOIST_BASE}/tasks/{t['id']}", headers=TODOIST_HEADERS, timeout=10)
-                return f"✅ Удалено: {t['content']}"
-        return f"Задача не найдена: {task_name}"
+        t = find_todoist_task(tasks, task_name)
+        if t is None:
+            return f"Задача не найдена: {task_name}"
+        if "error" in t:
+            return t["error"]
+        httpx.delete(f"{TODOIST_BASE}/tasks/{t['id']}", headers=TODOIST_HEADERS, timeout=10)
+        return f"✅ Удалено: {t['content']}"
     except Exception as ex:
         return f"Ошибка: {ex}"
 
 def update_todoist_task(task_name, new_content=None, new_priority=None, new_due_date=None):
     try:
         tasks = httpx.get(f"{TODOIST_BASE}/tasks", headers=TODOIST_HEADERS, timeout=10).json()
-        for t in tasks:
-            if task_name.lower() in t["content"].lower():
-                body = {}
-                if new_content: body["content"] = new_content
-                if new_priority: body["priority"] = PRIORITY_MAP.get(new_priority.lower(), t.get("priority", 2))
-                if new_due_date: body["due_date"] = new_due_date
-                httpx.post(f"{TODOIST_BASE}/tasks/{t['id']}", headers=TODOIST_HEADERS, json=body, timeout=10)
-                return f"✅ Обновлено: {new_content or t['content']}"
-        return f"Задача не найдена: {task_name}"
+        t = find_todoist_task(tasks, task_name)
+        if t is None:
+            return f"Задача не найдена: {task_name}"
+        if "error" in t:
+            return t["error"]
+        body = {}
+        if new_content:
+            body["content"] = new_content
+        if new_priority:
+            body["priority"] = PRIORITY_MAP.get(new_priority.lower(), t.get("priority", 2))
+        if new_due_date:
+            body["due_date"] = new_due_date
+        httpx.post(f"{TODOIST_BASE}/tasks/{t['id']}", headers=TODOIST_HEADERS, json=body, timeout=10)
+        return f"✅ Обновлено: {new_content or t['content']}"
     except Exception as ex:
         return f"Ошибка: {ex}"
 
@@ -245,14 +344,49 @@ async def transcribe_voice(file_path):
     try:
         with open(file_path, "rb") as f:
             audio_data = f.read()
-        async with httpx.AsyncClient(timeout=30) as http:
+
+        if len(audio_data) < 100:
+            return "Ошибка: аудиофайл пустой или повреждён"
+
+        # Конвертируем .oga → .mp3 через ffmpeg для надёжности
+        import subprocess
+        mp3_path = file_path.replace(".oga", ".mp3")
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-i", file_path, "-ar", "16000", "-ac", "1", "-b:a", "32k", mp3_path],
+            capture_output=True, timeout=30
+        )
+        if result.returncode != 0:
+            # ffmpeg недоступен — шлём .oga напрямую
+            send_path = file_path
+            send_name = "voice.oga"
+            send_type = "audio/ogg"
+        else:
+            send_path = mp3_path
+            send_name = "voice.mp3"
+            send_type = "audio/mpeg"
+
+        with open(send_path, "rb") as f:
+            send_data = f.read()
+
+        async with httpx.AsyncClient(timeout=60) as http:
             response = await http.post(
                 "https://api.openai.com/v1/audio/transcriptions",
                 headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
-                files={"file": ("voice.oga", audio_data, "audio/ogg")},
+                files={"file": (send_name, send_data, send_type)},
                 data={"model": "whisper-1", "language": "ru"},
             )
-        return response.json().get("text", "Не удалось распознать речь")
+
+        print(f"[Whisper] status={response.status_code} body={response.text[:300]}")
+
+        if response.status_code != 200:
+            return f"Ошибка Whisper {response.status_code}: {response.text[:200]}"
+
+        data = response.json()
+        text = data.get("text", "").strip()
+        if not text:
+            return "Whisper вернул пустой текст — попробуй ещё раз"
+        return text
+
     except Exception as ex:
         return f"Ошибка распознавания: {ex}"
 
@@ -332,6 +466,17 @@ TOOLS = [
         }
     },
     {
+        "name": "plan_day",
+        "description": "Показать план дня: события в календаре + свободные блоки времени. Используй когда Михаил просит распланировать день, спрашивает что есть в расписании или когда видишь что ему нужно найти свободное время.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "date": {"type": "string", "description": "YYYY-MM-DD"}
+            },
+            "required": ["date"]
+        }
+    },
+    {
         "name": "get_todoist_tasks",
         "description": "Получить все задачи из Todoist.",
         "input_schema": {"type": "object", "properties": {}}
@@ -387,11 +532,21 @@ SYSTEM_PROMPT = (
     "Когда выбирает — сразу ищи через web_search и присылай конкретные адреса, ссылки, контакты.\n"
     "Предлагай иногда что-то новое для кругозора.\n\n"
     "ЯНДЕКС ТАКСИ\n"
-    "Когда Михаил говорит поехать куда-то или вызвать такси:\n"
-    "1. Найди координаты назначения через web_search\n"
-    "2. Составь ссылку: https://3.redirect.appmetrica.yandex.com/route?start-lat=55.9773&start-lon=37.9218&end-lat=END_LAT&end-lon=END_LON&appmetrica_tracking_id=1178268795219780156\n"
-    "3. Пришли с текстом: Открыть маршрут в Яндекс Go\n"
-    "Координаты дома: lat=55.9773, lon=37.9218 (Ивантеевка, Голландский квартал)\n\n"
+    "Известные адреса Михаила:\n"
+    "- Дом: Ивантеевка, Голландский квартал, дом 17 → lat=55.970304, lon=37.874909\n"
+    "- Работа/офис: Пушкино, Ярославское шоссе, 114 → lat=55.996300, lon=37.868790\n"
+    "- Родители: Пушкино, проезд Чапаева, 9/11 → lat=55.988170, lon=37.852367\n"
+    "\n"
+    "Правило: определи откуда едет Михаил по контексту:\n"
+    "- Пишет \"домой\", \"с работы\", \"из офиса\" → старт с работы (55.996300, 37.868790)\n"
+    "- Пишет \"на работу\", \"в офис\", нет уточнения → старт из дома (55.970304, 37.874909)\n"
+    "- Пишет \"от родителей\", \"с Чапаева\" → старт от родителей (55.988170, 37.852367)\n"
+    "- Пишет \"к родителям\" → конец маршрута родители, старт определи по контексту\n"
+    "\n"
+    "Когда определил старт и конец:\n"
+    "1. Если конечная точка не из известных — найди координаты через web_search\n"
+    "2. Составь ссылку: https://3.redirect.appmetrica.yandex.com/route?start-lat=START_LAT&start-lon=START_LON&end-lat=END_LAT&end-lon=END_LON&appmetrica_tracking_id=1178268795219780156\n"
+    "3. Пришли с текстом: Открыть маршрут в Яндекс Go\n\n"
     "ПРОФИЛЬ МИХАИЛА\n"
     "Возраст: 27 лет\n"
     "Адрес: Ивантеевка, Голландский квартал, дом 17\n"
@@ -465,6 +620,8 @@ async def process_with_claude(user_id, message_text):
                     result, _ = get_events_for_date(inp["date"])
                 elif n == "add_todoist_task":
                     result = add_todoist_task(inp["content"], inp.get("priority", "p3"), inp.get("due_date"))
+                elif n == "plan_day":
+                    result = plan_day(inp["date"])
                 elif n == "get_todoist_tasks":
                     result = get_todoist_tasks()
                 elif n == "complete_todoist_task":
