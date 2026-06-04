@@ -21,6 +21,7 @@ TAVILY_API_KEY = os.environ["TAVILY_API_KEY"]
 
 import redis
 import json
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
@@ -650,6 +651,28 @@ SYSTEM_PROMPT = (
     "4. Инвестиции — пассивный доход\n\n"
     "GTD: максимум 3 ключевые задачи в день. Если задачу может сделать кто-то другой — скажи прямо.\n"
     "Принцип: не разобраться с сайтом, а написать Артёму про домен.\n\n"
+    "ПОИСК МЕСТ И АКТИВНОСТЕЙ\n"
+    "Когда Михаил просит найти ресторан, кальянную, каток, картинг, тир и т.д.:\n"
+    "\n"
+    "Шаг 1 — Определи свободное время:\n"
+    "- Если Михаил назвал время (например '2 часа') — используй его\n"
+    "- Если не назвал — вызови plan_day и найди ближайший свободный блок\n"
+    "\n"
+    "Шаг 2 — Найди место через web_search:\n"
+    "- Ищи рядом с текущим местоположением (по умолчанию Ивантеевка, если не сказал иное)\n"
+    "- Найди адрес и примерное время в пути (Яндекс.Карты или поиск)\n"
+    "\n"
+    "Шаг 3 — Посчитай хватит ли времени:\n"
+    "- Формула: дорога туда + время на месте + дорога обратно <= свободный блок\n"
+    "- Если Михаил не сказал сколько хочет провести там — спроси: 'На сколько едешь?'\n"
+    "- Если не влезает — скажи честно: 'Не успеешь, дорога X мин + X мин там + X мин обратно = X мин, а у тебя X мин'\n"
+    "- Предложи альтернативу ближе если не влезает\n"
+    "\n"
+    "Шаг 4 — Если влезает:\n"
+    "- Пришли: название, адрес, время в пути, режим работы\n"
+    "- Пришли deeplink такси до этого места\n"
+    "- Напомни когда надо выезжать обратно\n"
+    "\n"
     "НАПИСАТЬ СООБЩЕНИЕ ОТ ИМЕНИ МИХАИЛА\n"
     "Когда Михаил просит написать кому-то — используй инструмент compose_message.\n"
     "Правила составления сообщений:\n"
@@ -959,6 +982,32 @@ async def review(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"Ошибка: {e}")
 
+OWNER_CHAT_ID = os.environ.get("OWNER_CHAT_ID", "")
+
+async def morning_digest(bot):
+    """Утренний дайджест в 9:00 по Москве."""
+    if not OWNER_CHAT_ID:
+        print("[Digest] OWNER_CHAT_ID не задан")
+        return
+    try:
+        # Задачи из Todoist
+        tasks_text = get_todoist_tasks()
+
+        # События на сегодня
+        tz = pytz.timezone("Europe/Moscow")
+        today = datetime.now(tz).strftime("%Y-%m-%d")
+        events_text, _ = get_events_for_date(today)
+
+        msg = (
+            f"☀️ Доброе утро, Михаил!\n\n"
+            f"{events_text}\n"
+            f"{tasks_text}\n\n"
+            f"О чём напомнить сегодня? Напиши — добавлю в список."
+        )
+        await bot.send_message(chat_id=OWNER_CHAT_ID, text=msg)
+    except Exception as e:
+        print(f"[Digest] Ошибка: {e}")
+
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
@@ -973,6 +1022,16 @@ def main():
     app.add_handler(CommandHandler("forget", forget))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    # Запускаем утренний дайджест в 9:00 МСК
+    scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
+    scheduler.add_job(
+        morning_digest,
+        trigger="cron",
+        hour=9,
+        minute=0,
+        args=[app.bot]
+    )
+    scheduler.start()
     print("Бот запущен...")
     app.run_polling()
 
