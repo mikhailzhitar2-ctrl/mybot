@@ -6,6 +6,7 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from datetime import datetime, timedelta
 import pytz
+import re
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
@@ -14,6 +15,13 @@ GOOGLE_PRIVATE_KEY = os.environ["GOOGLE_PRIVATE_KEY"].replace("\\n", "\n")
 GOOGLE_CALENDAR_ID = os.environ["GOOGLE_CALENDAR_ID"]
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+def remove_markdown(text):
+    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
+    text = re.sub(r'\*(.+?)\*', r'\1', text)
+    text = re.sub(r'__(.+?)__', r'\1', text)
+    text = re.sub(r'_(.+?)_', r'\1', text)
+    return text
 
 def get_calendar_service():
     credentials = service_account.Credentials.from_service_account_info(
@@ -60,6 +68,35 @@ def get_today_events():
     except Exception as ex:
         return f"Ошибка получения календаря: {ex}"
 
+def get_tomorrow_events():
+    try:
+        service = get_calendar_service()
+        tz = pytz.timezone("Europe/Moscow")
+        tomorrow = datetime.now(tz) + timedelta(days=1)
+        start = tomorrow.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        end = tomorrow.replace(hour=23, minute=59, second=59, microsecond=0).isoformat()
+        events_result = service.events().list(
+            calendarId=GOOGLE_CALENDAR_ID,
+            timeMin=start,
+            timeMax=end,
+            singleEvents=True,
+            orderBy="startTime"
+        ).execute()
+        events = events_result.get("items", [])
+        if not events:
+            return "Завтра событий в календаре нет."
+        result = "📅 Завтра в календаре:\n"
+        for e in events:
+            start_time = e["start"].get("dateTime", e["start"].get("date", ""))
+            if "T" in start_time:
+                t = datetime.fromisoformat(start_time).astimezone(tz).strftime("%H:%M")
+            else:
+                t = "весь день"
+            result += f"• {t} — {e.get('summary', 'Без названия')}\n"
+        return result
+    except Exception as ex:
+        return f"Ошибка получения календаря: {ex}"
+
 def get_week_events():
     try:
         service = get_calendar_service()
@@ -94,6 +131,8 @@ SYSTEM_PROMPT = """Ты — персональный ИИ-ассистент п�
 
 У тебя есть доступ к его Google Calendar. Когда Михаил спрашивает про расписание или планирует день — используй данные из календаря которые будут переданы в сообщении.
 
+ВАЖНО: не используй markdown-форматирование. Никаких звёздочек, никакого **жирного**, никакого _курсива_. Только обычный текст и эмодзи.
+
 ═══════════════════════════════════════
 КОНТЕКСТ: КТО ТАКОЙ МИХАИЛ
 ═══════════════════════════════════════
@@ -119,7 +158,7 @@ GTD — 5 шагов:
 
 Принцип следующего действия: "Запустить сайт" — не действие. "Написать Артёму про домен" — действие.
 
-Делегирование: масштаб бизнеса зависит от уровня задач собственника. Если задачу может сделать кто-то другой — скажи об этом прямо.
+Делегирование: если задачу может сделать кто-то другой — скажи об этом прямо.
 
 ═══════════════════════════════════════
 КАК РАБОТАТЬ
@@ -140,7 +179,7 @@ GTD — 5 шагов:
 
 Итоги дня: что сделано / что отложил и почему / что завтра первым.
 
-СТИЛЬ: конкретика, без воды, короткие ответы, списки. Если план плохой — говори прямо."""
+СТИЛЬ: конкретика, без воды, короткие ответы, списки. Никакого markdown. Если план плохой — говори прямо."""
 
 user_histories = {}
 
@@ -150,6 +189,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Скинь задачи на сегодня — расставлю приоритеты и составлю план.\n\n"
         "Команды:\n"
         "/today — события на сегодня\n"
+        "/tomorrow — события на завтра\n"
         "/week — события на неделю\n"
         "/clear — сбросить историю\n"
         "/review — еженедельный GTD-обзор"
@@ -157,6 +197,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(get_today_events())
+
+async def tomorrow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(get_tomorrow_events())
 
 async def week(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(get_week_events())
@@ -169,8 +212,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_histories[user_id] = []
 
     calendar_context = ""
-    keywords = ["план", "день", "сегодня", "календарь", "расписание", "встреч", "задач", "утро", "вечер"]
-    if any(kw in user_text.lower() for kw in keywords):
+    today_keywords = ["сегодня", "план на день", "задачи на день", "утро", "вечер"]
+    tomorrow_keywords = ["завтра", "план на завтра", "задачи на завтра"]
+
+    if any(kw in user_text.lower() for kw in tomorrow_keywords):
+        calendar_context = "\n\n" + get_tomorrow_events()
+    elif any(kw in user_text.lower() for kw in today_keywords):
         calendar_context = "\n\n" + get_today_events()
 
     user_histories[user_id].append({"role": "user", "content": user_text + calendar_context})
@@ -185,7 +232,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             system=SYSTEM_PROMPT,
             messages=user_histories[user_id]
         )
-        reply = response.content[0].text
+        reply = remove_markdown(response.content[0].text)
         user_histories[user_id].append({"role": "assistant", "content": reply})
         await update.message.reply_text(reply)
     except Exception as e:
@@ -208,7 +255,7 @@ async def review(update: Update, context: ContextTypes.DEFAULT_TYPE):
             system=SYSTEM_PROMPT,
             messages=user_histories[user_id]
         )
-        reply = response.content[0].text
+        reply = remove_markdown(response.content[0].text)
         user_histories[user_id].append({"role": "assistant", "content": reply})
         await update.message.reply_text(reply)
     except Exception as e:
@@ -218,6 +265,7 @@ def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("today", today))
+    app.add_handler(CommandHandler("tomorrow", tomorrow))
     app.add_handler(CommandHandler("week", week))
     app.add_handler(CommandHandler("clear", clear))
     app.add_handler(CommandHandler("review", review))
