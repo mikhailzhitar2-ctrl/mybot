@@ -17,6 +17,7 @@ GOOGLE_SERVICE_ACCOUNT_EMAIL = os.environ["GOOGLE_SERVICE_ACCOUNT_EMAIL"]
 GOOGLE_PRIVATE_KEY = os.environ["GOOGLE_PRIVATE_KEY"].replace("\\n", "\n")
 GOOGLE_CALENDAR_ID = os.environ["GOOGLE_CALENDAR_ID"]
 TODOIST_API_KEY = os.environ["TODOIST_API_KEY"]
+TAVILY_API_KEY = os.environ["TAVILY_API_KEY"]
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
@@ -109,7 +110,7 @@ def add_event(summary, date_str, time_str, duration_hours=1):
         service = get_calendar_service()
         tz = pytz.timezone("Europe/Moscow")
         dt_start = tz.localize(datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M"))
-        dt_end = dt_start + timedelta(hours=duration_hours)
+        dt_end = dt_start + timedelta(hours=float(duration_hours))
         event = {
             "summary": summary,
             "start": {"dateTime": dt_start.isoformat(), "timeZone": "Europe/Moscow"},
@@ -141,9 +142,8 @@ def move_event(event_id, new_date_str, new_time_str):
         event = service.events().get(calendarId=GOOGLE_CALENDAR_ID, eventId=event_id).execute()
         duration = datetime.fromisoformat(event["end"]["dateTime"]) - datetime.fromisoformat(event["start"]["dateTime"])
         new_start = tz.localize(datetime.strptime(f"{new_date_str} {new_time_str}", "%Y-%m-%d %H:%M"))
-        new_end = new_start + duration
         event["start"] = {"dateTime": new_start.isoformat(), "timeZone": "Europe/Moscow"}
-        event["end"] = {"dateTime": new_end.isoformat(), "timeZone": "Europe/Moscow"}
+        event["end"] = {"dateTime": (new_start + duration).isoformat(), "timeZone": "Europe/Moscow"}
         service.events().update(calendarId=GOOGLE_CALENDAR_ID, eventId=event_id, body=event).execute()
         return f"✅ Перенесено на {new_date_str} в {new_time_str}"
     except Exception as ex:
@@ -153,17 +153,15 @@ def move_event(event_id, new_date_str, new_time_str):
 
 TODOIST_BASE = "https://api.todoist.com/rest/v2"
 TODOIST_HEADERS = {"Authorization": f"Bearer {TODOIST_API_KEY}"}
-
 PRIORITY_MAP = {"p1": 4, "p2": 3, "p3": 2, "p4": 1}
 PRIORITY_EMOJI = {4: "🔴", 3: "🟠", 2: "🔵", 1: "⚪"}
 
 def get_todoist_tasks():
     try:
-        resp = httpx.get(f"{TODOIST_BASE}/tasks", headers=TODOIST_HEADERS, timeout=10)
-        tasks = resp.json()
+        tasks = httpx.get(f"{TODOIST_BASE}/tasks", headers=TODOIST_HEADERS, timeout=10).json()
         if not tasks:
             return "В Todoist задач нет."
-        text = "📋 Задачи в Todoist:\n"
+        text = "📋 Задачи:\n"
         for t in sorted(tasks, key=lambda x: -x.get("priority", 1)):
             emoji = PRIORITY_EMOJI.get(t.get("priority", 1), "⚪")
             due = f" (до {t['due']['date']})" if t.get("due") else ""
@@ -174,61 +172,81 @@ def get_todoist_tasks():
 
 def add_todoist_task(content, priority="p3", due_date=None):
     try:
-        body = {
-            "content": content,
-            "priority": PRIORITY_MAP.get(priority.lower(), 2)
-        }
+        body = {"content": content, "priority": PRIORITY_MAP.get(priority.lower(), 2)}
         if due_date:
             body["due_date"] = due_date
-        resp = httpx.post(f"{TODOIST_BASE}/tasks", headers=TODOIST_HEADERS, json=body, timeout=10)
-        task = resp.json()
-        emoji = PRIORITY_EMOJI.get(body["priority"], "⚪")
-        return f"✅ Добавлено в Todoist: {emoji} {content}"
+        httpx.post(f"{TODOIST_BASE}/tasks", headers=TODOIST_HEADERS, json=body, timeout=10)
+        return f"✅ Добавлено в Todoist: {PRIORITY_EMOJI.get(body['priority'], '⚪')} {content}"
     except Exception as ex:
         return f"Ошибка: {ex}"
 
-def complete_todoist_task(task_name_fragment):
+def complete_todoist_task(task_name):
     try:
-        resp = httpx.get(f"{TODOIST_BASE}/tasks", headers=TODOIST_HEADERS, timeout=10)
-        tasks = resp.json()
+        tasks = httpx.get(f"{TODOIST_BASE}/tasks", headers=TODOIST_HEADERS, timeout=10).json()
         for t in tasks:
-            if task_name_fragment.lower() in t["content"].lower():
+            if task_name.lower() in t["content"].lower():
                 httpx.post(f"{TODOIST_BASE}/tasks/{t['id']}/close", headers=TODOIST_HEADERS, timeout=10)
-                return f"✅ Задача выполнена: {t['content']}"
-        return f"Задача '{task_name_fragment}' не найдена."
+                return f"✅ Выполнено: {t['content']}"
+        return f"Задача не найдена: {task_name}"
     except Exception as ex:
         return f"Ошибка: {ex}"
 
-def delete_todoist_task(task_name_fragment):
+def delete_todoist_task(task_name):
     try:
-        resp = httpx.get(f"{TODOIST_BASE}/tasks", headers=TODOIST_HEADERS, timeout=10)
-        tasks = resp.json()
+        tasks = httpx.get(f"{TODOIST_BASE}/tasks", headers=TODOIST_HEADERS, timeout=10).json()
         for t in tasks:
-            if task_name_fragment.lower() in t["content"].lower():
+            if task_name.lower() in t["content"].lower():
                 httpx.delete(f"{TODOIST_BASE}/tasks/{t['id']}", headers=TODOIST_HEADERS, timeout=10)
-                return f"✅ Удалено из Todoist: {t['content']}"
-        return f"Задача '{task_name_fragment}' не найдена."
+                return f"✅ Удалено: {t['content']}"
+        return f"Задача не найдена: {task_name}"
     except Exception as ex:
         return f"Ошибка: {ex}"
 
-def update_todoist_task(task_name_fragment, new_content=None, new_priority=None, new_due_date=None):
+def update_todoist_task(task_name, new_content=None, new_priority=None, new_due_date=None):
     try:
-        resp = httpx.get(f"{TODOIST_BASE}/tasks", headers=TODOIST_HEADERS, timeout=10)
-        tasks = resp.json()
+        tasks = httpx.get(f"{TODOIST_BASE}/tasks", headers=TODOIST_HEADERS, timeout=10).json()
         for t in tasks:
-            if task_name_fragment.lower() in t["content"].lower():
+            if task_name.lower() in t["content"].lower():
                 body = {}
-                if new_content:
-                    body["content"] = new_content
-                if new_priority:
-                    body["priority"] = PRIORITY_MAP.get(new_priority.lower(), t.get("priority", 2))
-                if new_due_date:
-                    body["due_date"] = new_due_date
+                if new_content: body["content"] = new_content
+                if new_priority: body["priority"] = PRIORITY_MAP.get(new_priority.lower(), t.get("priority", 2))
+                if new_due_date: body["due_date"] = new_due_date
                 httpx.post(f"{TODOIST_BASE}/tasks/{t['id']}", headers=TODOIST_HEADERS, json=body, timeout=10)
-                return f"✅ Задача обновлена: {new_content or t['content']}"
-        return f"Задача '{task_name_fragment}' не найдена."
+                return f"✅ Обновлено: {new_content or t['content']}"
+        return f"Задача не найдена: {task_name}"
     except Exception as ex:
         return f"Ошибка: {ex}"
+
+# ─── TAVILY SEARCH ─────────────────────────────────────────
+
+def web_search(query, search_depth="basic"):
+    try:
+        resp = httpx.post(
+            "https://api.tavily.com/search",
+            json={
+                "api_key": TAVILY_API_KEY,
+                "query": query,
+                "search_depth": search_depth,
+                "max_results": 5,
+                "include_answer": True,
+                "include_raw_content": False
+            },
+            timeout=15
+        )
+        data = resp.json()
+        results = data.get("results", [])
+        answer = data.get("answer", "")
+        if not results:
+            return "Ничего не найдено."
+        text = ""
+        if answer:
+            text += f"Краткий ответ: {answer}\n\n"
+        text += "Результаты:\n"
+        for r in results[:4]:
+            text += f"• {r.get('title', '')}\n  {r.get('url', '')}\n  {r.get('content', '')[:150]}...\n\n"
+        return text
+    except Exception as ex:
+        return f"Ошибка поиска: {ex}"
 
 # ─── WHISPER ───────────────────────────────────────────────
 
@@ -236,15 +254,14 @@ async def transcribe_voice(file_path):
     try:
         with open(file_path, "rb") as f:
             audio_data = f.read()
-        async with httpx.AsyncClient(timeout=30) as http_client:
-            response = await http_client.post(
+        async with httpx.AsyncClient(timeout=30) as http:
+            response = await http.post(
                 "https://api.openai.com/v1/audio/transcriptions",
                 headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
-                files={"file": ("voice.mp3", audio_data, "audio/mpeg")},
+                files={"file": ("voice.oga", audio_data, "audio/ogg")},
                 data={"model": "whisper-1", "language": "ru"},
             )
-        result = response.json()
-        return result.get("text", "Не удалось распознать речь")
+        return response.json().get("text", "Не удалось распознать речь")
     except Exception as ex:
         return f"Ошибка распознавания: {ex}"
 
@@ -252,8 +269,20 @@ async def transcribe_voice(file_path):
 
 TOOLS = [
     {
+        "name": "web_search",
+        "description": "Поиск в интернете. Используй для: поиска теннисных кортов / секций / клубов рядом с Ивантеевкой; поиска книг, статей, курсов по нужной теме; поиска тиров, картингов, вейкпарков рядом; любой актуальной информации с ссылками.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Поисковый запрос"},
+                "search_depth": {"type": "string", "description": "basic или advanced"}
+            },
+            "required": ["query"]
+        }
+    },
+    {
         "name": "add_calendar_event",
-        "description": "Добавить событие в Google Calendar. Используй для встреч, созвонов, активностей привязанных к конкретному времени.",
+        "description": "Добавить событие в Google Calendar — встречу, активность привязанную к времени.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -279,14 +308,14 @@ TOOLS = [
     },
     {
         "name": "move_calendar_event",
-        "description": "Перенести событие в Google Calendar на другую дату/время.",
+        "description": "Перенести событие в Google Calendar.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "date": {"type": "string", "description": "Текущая дата YYYY-MM-DD"},
+                "date": {"type": "string"},
                 "event_name": {"type": "string"},
-                "new_date": {"type": "string", "description": "YYYY-MM-DD"},
-                "new_time": {"type": "string", "description": "HH:MM"}
+                "new_date": {"type": "string"},
+                "new_time": {"type": "string"}
             },
             "required": ["date", "event_name", "new_date", "new_time"]
         }
@@ -296,21 +325,19 @@ TOOLS = [
         "description": "Получить события календаря на дату.",
         "input_schema": {
             "type": "object",
-            "properties": {
-                "date": {"type": "string", "description": "YYYY-MM-DD"}
-            },
+            "properties": {"date": {"type": "string", "description": "YYYY-MM-DD"}},
             "required": ["date"]
         }
     },
     {
         "name": "add_todoist_task",
-        "description": "Добавить задачу в Todoist. Используй для дел без конкретного времени — позвонить, написать, сделать что-то.",
+        "description": "Добавить задачу в Todoist — дела без конкретного времени.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "content": {"type": "string"},
-                "priority": {"type": "string", "description": "p1 (срочно+важно), p2 (важно), p3 (средний), p4 (низкий)"},
-                "due_date": {"type": "string", "description": "YYYY-MM-DD, опционально"}
+                "priority": {"type": "string", "description": "p1/p2/p3/p4"},
+                "due_date": {"type": "string", "description": "YYYY-MM-DD"}
             },
             "required": ["content", "priority"]
         }
@@ -322,12 +349,10 @@ TOOLS = [
     },
     {
         "name": "complete_todoist_task",
-        "description": "Отметить задачу в Todoist как выполненную.",
+        "description": "Отметить задачу выполненной.",
         "input_schema": {
             "type": "object",
-            "properties": {
-                "task_name": {"type": "string", "description": "Часть названия задачи"}
-            },
+            "properties": {"task_name": {"type": "string"}},
             "required": ["task_name"]
         }
     },
@@ -336,22 +361,20 @@ TOOLS = [
         "description": "Удалить задачу из Todoist.",
         "input_schema": {
             "type": "object",
-            "properties": {
-                "task_name": {"type": "string"}
-            },
+            "properties": {"task_name": {"type": "string"}},
             "required": ["task_name"]
         }
     },
     {
         "name": "update_todoist_task",
-        "description": "Изменить задачу в Todoist — название, приоритет или срок.",
+        "description": "Изменить задачу в Todoist.",
         "input_schema": {
             "type": "object",
             "properties": {
-                "task_name": {"type": "string", "description": "Часть текущего названия задачи"},
+                "task_name": {"type": "string"},
                 "new_content": {"type": "string"},
-                "new_priority": {"type": "string", "description": "p1/p2/p3/p4"},
-                "new_due_date": {"type": "string", "description": "YYYY-MM-DD"}
+                "new_priority": {"type": "string"},
+                "new_due_date": {"type": "string"}
             },
             "required": ["task_name"]
         }
@@ -366,75 +389,76 @@ SYSTEM_PROMPT = """Ты — персональный ИИ-ассистент М�
 ПРАВИЛО: КАЛЕНДАРЬ vs TODOIST
 ━━━━━━━━━━━━━━━━━━━━━
 
-Календарь = событие привязанное ко времени:
-- встреча, созвон, тренировка в 18:00, обед в 13:00, поездка
-
-Todoist = задача без конкретного времени:
-- позвонить поставщику, написать ТЗ, проверить отчёт, купить что-то
-
-Если человек говорит "добавь задачу" — Todoist.
-Если "запланируй встречу/событие на время" — Календарь.
-Если непонятно — уточни одним вопросом.
+Календарь = событие привязанное к времени (встреча, тренировка, поездка)
+Todoist = задача без конкретного времени (позвонить, написать, сделать что-то)
 
 Приоритеты Todoist:
-🔴 P1 — срочно и важно (влияет на деньги прямо сейчас)
-🟠 P2 — важно, не срочно (стратегия, развитие)
-🔵 P3 — средний (обычные рабочие задачи)
-⚪ P4 — низкий (когда-нибудь)
+🔴 P1 — срочно+важно (деньги прямо сейчас)
+🟠 P2 — важно, не срочно (стратегия)
+🔵 P3 — обычные задачи
+⚪ P4 — низкий приоритет
+
+━━━━━━━━━━━━━━━━━━━━━
+СВОБОДНЫЕ БЛОКИ В РАСПИСАНИИ
+━━━━━━━━━━━━━━━━━━━━━
+
+Когда видишь свободный блок 1.5+ часа — предлагай 2-3 варианта чем заняться:
+
+Формат предложения:
+"У тебя свободно с 15:00 до 17:00. Варианты:
+1. Теннис — найти корт рядом с Ивантеевкой? (поищу прямо сейчас)
+2. Почитать про e-commerce продажи — найду крутую статью или главу книги
+3. Время с детьми — погулять с сыном и дочкой"
+
+Когда Михаил выбирает — сразу ищи через web_search и присылай конкретные ссылки, адреса, контакты.
+
+Предлагай не только из его списка интересов — иногда что-то новое для расширения кругозора.
+
+━━━━━━━━━━━━━━━━━━━━━
+ПОИСК
+━━━━━━━━━━━━━━━━━━━━━
+
+Используй web_search когда:
+- Ищешь корты, тиры, картинги, вейкпарки рядом с Ивантеевкой
+- Ищешь книги или статьи по нужной теме (давай реальные ссылки)
+- Ищешь любую актуальную информацию
+
+Адрес для поиска мест: Ивантеевка, Московская область (рядом Мытищи, Пушкино, Щёлково)
 
 ━━━━━━━━━━━━━━━━━━━━━
 ПРОФИЛЬ МИХАИЛА
 ━━━━━━━━━━━━━━━━━━━━━
 
 Возраст: 27 лет
-Адрес: Московская область, Ивантеевка, Голландский квартал, дом 17 (для поиска мест рядом)
+Адрес: Ивантеевка, Голландский квартал, дом 17
 
-Семья:
-- Жена Анна, 25 лет, женаты с 2020
-- Сын, 1.3 года
-- Дочка, 2.5 года
+Семья: жена Анна 25 лет (с 2020), сын 1.3 года, дочка 2.5 года
 
-Бизнес: бренд одежды YStaler, оборот 35 млн/мес на Wildberries, партнёрство 50/50
+Бизнес: YStaler, оборот 35 млн/мес Wildberries, партнёрство 50/50
 Инвестиции: облигации, купоны, реинвестирование
 
-Режим:
-- Встаёт 8:00, ложится 00:00-03:00 (цель — до 00:00)
-- Рабочие часы: пн 6ч, вт 5ч, ср 5ч, чт 4ч, пт 5ч
+Режим: встаёт 8:00, цель — спать до 00:00
+Рабочие часы: пн 6ч, вт 5ч, ср 5ч, чт 4ч, пт 5ч
 
 Спорт (травма плеча/спины — силовые нельзя):
-- Можно: турник, пресс, кардио, теннис, настольный теннис
-- Хочет попробовать: теннис, настольный теннис, тир
+Можно: турник, пресс, кардио, теннис, настольный теннис
+Хочет попробовать: теннис, настольный теннис, тир
 
 Учёба (приоритеты):
 1. Искусственный интеллект
 2. Продажи в e-commerce
 3. Маркетинг и продвижение бренда
-4. Публичная речь, коммуникации, словарный запас
+4. Публичная речь и коммуникации
 
-Хобби: охота, стрельба, компьютеры, баня, СПА, вейкборд, картинг, машины, пиво с друзьями, инвестиции
-
-━━━━━━━━━━━━━━━━━━━━━
-ПЛАНИРОВАНИЕ ДНЯ
-━━━━━━━━━━━━━━━━━━━━━
-
-Когда просит распланировать день:
-1. Получи занятые слоты из календаря
-2. Свободное время раздели на блоки: Работа / Учёба / Спорт / Семья / Отдых / Сон
-3. Предлагай конкретные активности из его интересов:
-   "19:00-21:00 свободно — найти корт для тенниса рядом с Ивантеевкой?"
-   "После обеда 30 минут — почитай про e-commerce продажи"
-4. Учитывай рабочие часы по дням недели
-5. Предлагай сам, не жди пока спросит
+Хобби: охота, стрельба, компьютеры, баня, СПА, вейкборд, картинг, машины, пиво с друзьями
 
 ━━━━━━━━━━━━━━━━━━━━━
-ПРИОРИТЕТЫ БИЗНЕСА
+GTD
 ━━━━━━━━━━━━━━━━━━━━━
-1. Wildberries — оборот и прибыль
-2. Сайт и Telegram — стратегия
-3. Тренеры и амбассадоры — долгосрочно
-4. Инвестиции — пассивный доход
 
-GTD: максимум 3 ключевые задачи в день. Если задачу может сделать кто-то другой — скажи прямо."""
+Максимум 3 ключевые задачи в день.
+Если задачу может сделать кто-то другой — скажи прямо.
+Принцип следующего действия: не "разобраться с сайтом", а "написать Артёму про домен"."""
 
 user_histories = {}
 
@@ -447,15 +471,14 @@ async def process_with_claude(user_id, message_text):
     today_date = now.strftime("%Y-%m-%d")
     tomorrow_date = (now + timedelta(days=1)).strftime("%Y-%m-%d")
     weekdays = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
-    today_weekday = weekdays[now.weekday()]
 
     calendar_context = ""
     if any(kw in message_text.lower() for kw in ["завтра", "план на завтра"]):
         calendar_context = "\n\n" + get_tomorrow_events()
-    elif any(kw in message_text.lower() for kw in ["сегодня", "план на день", "утро", "вечер"]):
+    elif any(kw in message_text.lower() for kw in ["сегодня", "план на день", "утро", "вечер", "распланируй"]):
         calendar_context = "\n\n" + get_today_events()
 
-    full_msg = f"{message_text}\n\n[Сегодня: {today_date} ({today_weekday}). Завтра: {tomorrow_date}]{calendar_context}"
+    full_msg = f"{message_text}\n\n[Сегодня: {today_date} ({weekdays[now.weekday()]}). Завтра: {tomorrow_date}]{calendar_context}"
     user_histories[user_id].append({"role": "user", "content": full_msg})
 
     if len(user_histories[user_id]) > 20:
@@ -463,7 +486,7 @@ async def process_with_claude(user_id, message_text):
 
     response = client.messages.create(
         model="claude-sonnet-4-5",
-        max_tokens=1500,
+        max_tokens=2000,
         system=SYSTEM_PROMPT,
         tools=TOOLS,
         messages=user_histories[user_id]
@@ -474,26 +497,28 @@ async def process_with_claude(user_id, message_text):
         for block in response.content:
             if block.type == "tool_use":
                 inp = block.input
-                name = block.name
-                if name == "add_calendar_event":
+                n = block.name
+                if n == "web_search":
+                    result = web_search(inp["query"], inp.get("search_depth", "basic"))
+                elif n == "add_calendar_event":
                     result = add_event(inp["summary"], inp["date"], inp["time"], inp.get("duration_hours", 1))
-                elif name == "delete_calendar_event":
+                elif n == "delete_calendar_event":
                     eid, ename = find_event_id(inp["date"], inp["event_name"])
-                    result = delete_event(eid) + f" ({ename})" if eid else f"Событие не найдено: {inp['event_name']}"
-                elif name == "move_calendar_event":
+                    result = delete_event(eid) + f" ({ename})" if eid else f"Не найдено: {inp['event_name']}"
+                elif n == "move_calendar_event":
                     eid, ename = find_event_id(inp["date"], inp["event_name"])
-                    result = move_event(eid, inp["new_date"], inp["new_time"]) + f" ({ename})" if eid else f"Событие не найдено: {inp['event_name']}"
-                elif name == "get_calendar_events":
+                    result = move_event(eid, inp["new_date"], inp["new_time"]) + f" ({ename})" if eid else f"Не найдено: {inp['event_name']}"
+                elif n == "get_calendar_events":
                     result, _ = get_events_for_date(inp["date"])
-                elif name == "add_todoist_task":
+                elif n == "add_todoist_task":
                     result = add_todoist_task(inp["content"], inp.get("priority", "p3"), inp.get("due_date"))
-                elif name == "get_todoist_tasks":
+                elif n == "get_todoist_tasks":
                     result = get_todoist_tasks()
-                elif name == "complete_todoist_task":
+                elif n == "complete_todoist_task":
                     result = complete_todoist_task(inp["task_name"])
-                elif name == "delete_todoist_task":
+                elif n == "delete_todoist_task":
                     result = delete_todoist_task(inp["task_name"])
-                elif name == "update_todoist_task":
+                elif n == "update_todoist_task":
                     result = update_todoist_task(inp["task_name"], inp.get("new_content"), inp.get("new_priority"), inp.get("new_due_date"))
                 else:
                     result = "Неизвестный инструмент"
@@ -502,7 +527,7 @@ async def process_with_claude(user_id, message_text):
         user_histories[user_id].append({"role": "assistant", "content": response.content})
         user_histories[user_id].append({"role": "user", "content": tool_results})
         response = client.messages.create(
-            model="claude-sonnet-4-5", max_tokens=1000,
+            model="claude-sonnet-4-5", max_tokens=2000,
             system=SYSTEM_PROMPT, tools=TOOLS,
             messages=user_histories[user_id]
         )
@@ -521,7 +546,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/tasks — задачи из Todoist\n"
         "/clear — сбросить историю\n"
         "/review — еженедельный GTD-обзор\n\n"
-        "Пишешь или говоришь — я на связи."
+        "Пишешь или говоришь — я здесь."
     )
 
 async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -547,8 +572,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     try:
-        voice = update.message.voice
-        tg_file = await context.bot.get_file(voice.file_id)
+        tg_file = await context.bot.get_file(update.message.voice.file_id)
         with tempfile.NamedTemporaryFile(suffix=".oga", delete=False) as tmp:
             await tg_file.download_to_drive(tmp.name)
             text = await transcribe_voice(tmp.name)
