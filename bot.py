@@ -784,7 +784,6 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with tempfile.NamedTemporaryFile(suffix=".oga", delete=False) as tmp:
             await tg_file.download_to_drive(tmp.name)
             text = await transcribe_voice(tmp.name)
-        await update.message.reply_text(f"🎤 {text}")
         if "ошибка" not in text.lower() and "не удалось" not in text.lower():
             reply = await process_with_claude(user_id, text)
             await update.message.reply_text(reply)
