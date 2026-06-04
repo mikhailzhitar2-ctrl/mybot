@@ -7,6 +7,7 @@ from googleapiclient.discovery import build
 from datetime import datetime, timedelta
 import pytz
 import re
+import json
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
@@ -48,10 +49,8 @@ def get_today_events():
         end = now.replace(hour=23, minute=59, second=59, microsecond=0).isoformat()
         events_result = service.events().list(
             calendarId=GOOGLE_CALENDAR_ID,
-            timeMin=start,
-            timeMax=end,
-            singleEvents=True,
-            orderBy="startTime"
+            timeMin=start, timeMax=end,
+            singleEvents=True, orderBy="startTime"
         ).execute()
         events = events_result.get("items", [])
         if not events:
@@ -59,10 +58,7 @@ def get_today_events():
         result = "📅 Сегодня в календаре:\n"
         for e in events:
             start_time = e["start"].get("dateTime", e["start"].get("date", ""))
-            if "T" in start_time:
-                t = datetime.fromisoformat(start_time).astimezone(tz).strftime("%H:%M")
-            else:
-                t = "весь день"
+            t = datetime.fromisoformat(start_time).astimezone(pytz.timezone("Europe/Moscow")).strftime("%H:%M") if "T" in start_time else "весь день"
             result += f"• {t} — {e.get('summary', 'Без названия')}\n"
         return result
     except Exception as ex:
@@ -77,10 +73,8 @@ def get_tomorrow_events():
         end = tomorrow.replace(hour=23, minute=59, second=59, microsecond=0).isoformat()
         events_result = service.events().list(
             calendarId=GOOGLE_CALENDAR_ID,
-            timeMin=start,
-            timeMax=end,
-            singleEvents=True,
-            orderBy="startTime"
+            timeMin=start, timeMax=end,
+            singleEvents=True, orderBy="startTime"
         ).execute()
         events = events_result.get("items", [])
         if not events:
@@ -88,10 +82,7 @@ def get_tomorrow_events():
         result = "📅 Завтра в календаре:\n"
         for e in events:
             start_time = e["start"].get("dateTime", e["start"].get("date", ""))
-            if "T" in start_time:
-                t = datetime.fromisoformat(start_time).astimezone(tz).strftime("%H:%M")
-            else:
-                t = "весь день"
+            t = datetime.fromisoformat(start_time).astimezone(pytz.timezone("Europe/Moscow")).strftime("%H:%M") if "T" in start_time else "весь день"
             result += f"• {t} — {e.get('summary', 'Без названия')}\n"
         return result
     except Exception as ex:
@@ -106,10 +97,8 @@ def get_week_events():
         end = (now + timedelta(days=7)).replace(hour=23, minute=59, second=59).isoformat()
         events_result = service.events().list(
             calendarId=GOOGLE_CALENDAR_ID,
-            timeMin=start,
-            timeMax=end,
-            singleEvents=True,
-            orderBy="startTime"
+            timeMin=start, timeMax=end,
+            singleEvents=True, orderBy="startTime"
         ).execute()
         events = events_result.get("items", [])
         if not events:
@@ -118,7 +107,7 @@ def get_week_events():
         for e in events:
             start_time = e["start"].get("dateTime", e["start"].get("date", ""))
             if "T" in start_time:
-                dt = datetime.fromisoformat(start_time).astimezone(tz)
+                dt = datetime.fromisoformat(start_time).astimezone(pytz.timezone("Europe/Moscow"))
                 t = dt.strftime("%d.%m %H:%M")
             else:
                 t = start_time
@@ -127,11 +116,48 @@ def get_week_events():
     except Exception as ex:
         return f"Ошибка получения календаря: {ex}"
 
+def add_event(summary, date_str, time_str, duration_hours=1):
+    try:
+        service = get_calendar_service()
+        tz = pytz.timezone("Europe/Moscow")
+        dt_start = tz.localize(datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M"))
+        dt_end = dt_start + timedelta(hours=duration_hours)
+        event = {
+            "summary": summary,
+            "start": {"dateTime": dt_start.isoformat(), "timeZone": "Europe/Moscow"},
+            "end": {"dateTime": dt_end.isoformat(), "timeZone": "Europe/Moscow"},
+        }
+        service.events().insert(calendarId=GOOGLE_CALENDAR_ID, body=event).execute()
+        return f"✅ Добавлено в календарь: {summary} — {date_str} в {time_str}"
+    except Exception as ex:
+        return f"Ошибка добавления события: {ex}"
+
+TOOLS = [
+    {
+        "name": "add_calendar_event",
+        "description": "Добавить событие в Google Calendar пользователя. Используй когда пользователь просит внести, добавить или записать что-то в календарь.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "summary": {"type": "string", "description": "Название события"},
+                "date": {"type": "string", "description": "Дата в формате YYYY-MM-DD, например 2026-06-05"},
+                "time": {"type": "string", "description": "Время начала в формате HH:MM, например 15:00"},
+                "duration_hours": {"type": "number", "description": "Длительность в часах, по умолчанию 1"}
+            },
+            "required": ["summary", "date", "time"]
+        }
+    }
+]
+
 SYSTEM_PROMPT = """Ты — персональный ИИ-ассистент предпринимателя Михаила.
 
-У тебя есть доступ к его Google Calendar. Когда Михаил спрашивает про расписание или планирует день — используй данные из календаря которые будут переданы в сообщении.
+У тебя есть доступ к его Google Calendar — ты можешь читать события и добавлять новые через инструмент add_calendar_event.
 
-ВАЖНО: не используй markdown-форматирование. Никаких звёздочек, никакого **жирного**, никакого _курсива_. Только обычный текст и эмодзи.
+Когда Михаил просит внести событие в календарь — сразу используй инструмент, не спрашивай подтверждения лишний раз.
+
+ВАЖНО: не используй markdown. Никаких звёздочек, никакого жирного текста. Только обычный текст и эмодзи.
+
+Сегодняшняя дата для справки: используй её при расчёте дат "сегодня", "завтра", "в пятницу" и т.д.
 
 ═══════════════════════════════════════
 КОНТЕКСТ: КТО ТАКОЙ МИХАИЛ
@@ -151,7 +177,7 @@ SYSTEM_PROMPT = """Ты — персональный ИИ-ассистент п�
 
 GTD — 5 шагов:
 1. СБОР — фиксируй всё немедленно
-2. ПРОЯСНЕНИЕ — "Что конкретно нужно сделать?" Правило 2 минут.
+2. ПРОЯСНЕНИЕ — что конкретно нужно сделать? Правило 2 минут.
 3. ОРГАНИЗАЦИЯ — Сделать / Делегировать / Отложить / Удалить
 4. ОБЗОР — еженедельно по пятницам
 5. ДЕЙСТВИЕ — по контексту, времени, энергии
@@ -177,9 +203,7 @@ GTD — 5 шагов:
 
 Прокрастинация: не мотивируй, декомпозируй до шага на 10 минут.
 
-Итоги дня: что сделано / что отложил и почему / что завтра первым.
-
-СТИЛЬ: конкретика, без воды, короткие ответы, списки. Никакого markdown. Если план плохой — говори прямо."""
+СТИЛЬ: конкретика, без воды, короткие ответы, списки. Если план плохой — говори прямо."""
 
 user_histories = {}
 
@@ -211,14 +235,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id not in user_histories:
         user_histories[user_id] = []
 
+    # Auto-attach calendar context
     calendar_context = ""
-    today_keywords = ["сегодня", "план на день", "задачи на день", "утро", "вечер"]
+    tz = pytz.timezone("Europe/Moscow")
+    today_date = datetime.now(tz).strftime("%Y-%m-%d")
+    tomorrow_date = (datetime.now(tz) + timedelta(days=1)).strftime("%Y-%m-%d")
+
     tomorrow_keywords = ["завтра", "план на завтра", "задачи на завтра"]
+    today_keywords = ["сегодня", "план на день", "утро", "вечер"]
 
     if any(kw in user_text.lower() for kw in tomorrow_keywords):
-        calendar_context = "\n\n" + get_tomorrow_events()
+        calendar_context = f"\n\nСегодняшняя дата: {today_date}\nДата завтра: {tomorrow_date}\n" + get_tomorrow_events()
     elif any(kw in user_text.lower() for kw in today_keywords):
-        calendar_context = "\n\n" + get_today_events()
+        calendar_context = f"\n\nСегодняшняя дата: {today_date}\n" + get_today_events()
+    else:
+        calendar_context = f"\n\nСегодняшняя дата: {today_date}"
 
     user_histories[user_id].append({"role": "user", "content": user_text + calendar_context})
 
@@ -230,11 +261,50 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             model="claude-sonnet-4-5",
             max_tokens=1000,
             system=SYSTEM_PROMPT,
+            tools=TOOLS,
             messages=user_histories[user_id]
         )
-        reply = remove_markdown(response.content[0].text)
-        user_histories[user_id].append({"role": "assistant", "content": reply})
-        await update.message.reply_text(reply)
+
+        # Handle tool use
+        if response.stop_reason == "tool_use":
+            tool_results = []
+            assistant_content = response.content
+
+            for block in response.content:
+                if block.type == "tool_use":
+                    if block.name == "add_calendar_event":
+                        inp = block.input
+                        result = add_event(
+                            summary=inp["summary"],
+                            date_str=inp["date"],
+                            time_str=inp["time"],
+                            duration_hours=inp.get("duration_hours", 1)
+                        )
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": result
+                        })
+
+            # Continue conversation with tool result
+            user_histories[user_id].append({"role": "assistant", "content": assistant_content})
+            user_histories[user_id].append({"role": "user", "content": tool_results})
+
+            followup = client.messages.create(
+                model="claude-sonnet-4-5",
+                max_tokens=500,
+                system=SYSTEM_PROMPT,
+                tools=TOOLS,
+                messages=user_histories[user_id]
+            )
+            reply = remove_markdown(followup.content[0].text)
+            user_histories[user_id].append({"role": "assistant", "content": reply})
+            await update.message.reply_text(reply)
+        else:
+            reply = remove_markdown(response.content[0].text)
+            user_histories[user_id].append({"role": "assistant", "content": reply})
+            await update.message.reply_text(reply)
+
     except Exception as e:
         await update.message.reply_text(f"Ошибка: {e}")
 
@@ -247,7 +317,9 @@ async def review(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id not in user_histories:
         user_histories[user_id] = []
-    user_histories[user_id].append({"role": "user", "content": "Проведи со мной еженедельный обзор GTD. Задавай вопросы по одному."})
+    tz = pytz.timezone("Europe/Moscow")
+    today_date = datetime.now(tz).strftime("%Y-%m-%d")
+    user_histories[user_id].append({"role": "user", "content": f"Проведи со мной еженедельный обзор GTD. Задавай вопросы по одному.\n\nСегодняшняя дата: {today_date}"})
     try:
         response = client.messages.create(
             model="claude-sonnet-4-5",
