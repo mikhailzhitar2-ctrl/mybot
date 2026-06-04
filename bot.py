@@ -247,7 +247,11 @@ def add_todoist_task(content, priority="p3", due_date=None):
         body = {"content": content, "priority": PRIORITY_MAP.get(priority.lower(), 2)}
         if due_date:
             body["due_date"] = due_date
-        httpx.post(f"{TODOIST_BASE}/tasks", headers=TODOIST_HEADERS, json=body, timeout=10)
+        headers = {**TODOIST_HEADERS, "Content-Type": "application/json"}
+        resp = httpx.post(f"{TODOIST_BASE}/tasks", headers=headers, json=body, timeout=10)
+        print(f"[Todoist add] status={resp.status_code} body={resp.text[:300]}")
+        if resp.status_code not in (200, 204):
+            return f"Ошибка Todoist {resp.status_code}: {resp.text[:200]}"
         return f"✅ Добавлено в Todoist: {PRIORITY_EMOJI.get(body['priority'], '⚪')} {content}"
     except Exception as ex:
         return f"Ошибка: {ex}"
@@ -705,7 +709,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/week — события на неделю\n"
         "/tasks — задачи из Todoist\n"
         "/clear — сбросить историю\n"
-        "/review — еженедельный GTD-обзор\n\n"
+        "/review — еженедельный GTD-обзор\n"
+        "/todoist_check — диагностика Todoist\n\n"
         "Пишешь или говоришь — я здесь."
     )
 
@@ -801,6 +806,40 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"Ошибка голосового: {e}")
 
+async def todoist_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Диагностика Todoist — проверяет токен и создаёт тестовую задачу."""
+    try:
+        # Проверяем GET
+        resp = httpx.get(f"{TODOIST_BASE}/tasks", headers=TODOIST_HEADERS, timeout=10)
+        if resp.status_code != 200:
+            await update.message.reply_text(f"❌ GET /tasks — {resp.status_code}: {resp.text[:200]}")
+            return
+
+        tasks = resp.json()
+        # Создаём тестовую задачу
+        headers = {**TODOIST_HEADERS, "Content-Type": "application/json"}
+        add_resp = httpx.post(
+            f"{TODOIST_BASE}/tasks",
+            headers=headers,
+            json={"content": "🧪 Тест бота — удали меня", "priority": 1},
+            timeout=10
+        )
+        if add_resp.status_code in (200, 204):
+            task_id = add_resp.json().get("id", "?")
+            # Сразу удаляем тестовую задачу
+            httpx.delete(f"{TODOIST_BASE}/tasks/{task_id}", headers=TODOIST_HEADERS, timeout=10)
+            await update.message.reply_text(
+                f"✅ Todoist работает\n"
+                f"Задач сейчас: {len(tasks)}\n"
+                f"Тестовая задача создана и удалена (id={task_id})"
+            )
+        else:
+            await update.message.reply_text(
+                f"❌ POST /tasks — {add_resp.status_code}:\n{add_resp.text[:300]}"
+            )
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка диагностики: {e}")
+
 async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_histories[update.effective_user.id] = []
     await update.message.reply_text("История очищена.")
@@ -820,6 +859,7 @@ def main():
     app.add_handler(CommandHandler("week", week))
     app.add_handler(CommandHandler("tasks", tasks))
     app.add_handler(CommandHandler("clear", clear))
+    app.add_handler(CommandHandler("todoist_check", todoist_check))
     app.add_handler(CommandHandler("review", review))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
