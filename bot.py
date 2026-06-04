@@ -223,7 +223,7 @@ def move_event(event_id, new_date_str, new_time_str):
     except Exception as ex:
         return f"Ошибка: {ex}"
 
-TODOIST_BASE = "https://api.todoist.com/rest/v2"
+TODOIST_BASE = "https://api.todoist.com/api/v1"
 TODOIST_HEADERS = {"Authorization": f"Bearer {TODOIST_API_KEY}"}
 PRIORITY_MAP = {"p1": 4, "p2": 3, "p3": 2, "p4": 1}
 PRIORITY_EMOJI = {4: "🔴", 3: "🟠", 2: "🔵", 1: "⚪"}
