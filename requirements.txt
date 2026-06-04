@@ -6,3 +6,4 @@ google-auth-oauthlib==1.2.0
 google-api-python-client==2.131.0
 pytz==2024.1
 redis==5.0.1
+apscheduler==3.10.4
