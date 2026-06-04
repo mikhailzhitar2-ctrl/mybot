@@ -352,31 +352,11 @@ async def transcribe_voice(file_path):
         if len(audio_data) < 100:
             return "Ошибка: аудиофайл пустой или повреждён"
 
-        # Конвертируем .oga → .mp3 через ffmpeg для надёжности
-        import subprocess
-        mp3_path = file_path.replace(".oga", ".mp3")
-        result = subprocess.run(
-            ["ffmpeg", "-y", "-i", file_path, "-ar", "16000", "-ac", "1", "-b:a", "32k", mp3_path],
-            capture_output=True, timeout=30
-        )
-        if result.returncode != 0:
-            # ffmpeg недоступен — шлём .oga напрямую
-            send_path = file_path
-            send_name = "voice.oga"
-            send_type = "audio/ogg"
-        else:
-            send_path = mp3_path
-            send_name = "voice.mp3"
-            send_type = "audio/mpeg"
-
-        with open(send_path, "rb") as f:
-            send_data = f.read()
-
         async with httpx.AsyncClient(timeout=60) as http:
             response = await http.post(
                 "https://api.openai.com/v1/audio/transcriptions",
                 headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
-                files={"file": (send_name, send_data, send_type)},
+                files={"file": ("voice.oga", audio_data, "audio/ogg")},
                 data={"model": "whisper-1", "language": "ru"},
             )
 
