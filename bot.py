@@ -2,13 +2,107 @@ import os
 import anthropic
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, filters, ContextTypes
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
+from googleapiclient.discovery import build
+from datetime import datetime, timedelta
+import pytz
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
+GOOGLE_REFRESH_TOKEN = os.environ["GOOGLE_REFRESH_TOKEN"]
+GOOGLE_CLIENT_ID = os.environ["GOOGLE_CLIENT_ID"]
+GOOGLE_CLIENT_SECRET = os.environ["GOOGLE_CLIENT_SECRET"]
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
+def get_calendar_service():
+    creds = Credentials(
+        token=None,
+        refresh_token=GOOGLE_REFRESH_TOKEN,
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=GOOGLE_CLIENT_ID,
+        client_secret=GOOGLE_CLIENT_SECRET,
+        scopes=["https://www.googleapis.com/auth/calendar"]
+    )
+    creds.refresh(Request())
+    return build("calendar", "v3", credentials=creds)
+
+def get_today_events():
+    try:
+        service = get_calendar_service()
+        tz = pytz.timezone("Europe/Moscow")
+        now = datetime.now(tz)
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        end = now.replace(hour=23, minute=59, second=59, microsecond=0).isoformat()
+        events_result = service.events().list(
+            calendarId="primary",
+            timeMin=start,
+            timeMax=end,
+            singleEvents=True,
+            orderBy="startTime"
+        ).execute()
+        events = events_result.get("items", [])
+        if not events:
+            return "Сегодня событий в календаре нет."
+        result = "📅 Сегодня в календаре:\n"
+        for e in events:
+            start_time = e["start"].get("dateTime", e["start"].get("date", ""))
+            if "T" in start_time:
+                t = datetime.fromisoformat(start_time).astimezone(tz).strftime("%H:%M")
+            else:
+                t = "весь день"
+            result += f"• {t} — {e.get('summary', 'Без названия')}\n"
+        return result
+    except Exception as ex:
+        return f"Ошибка получения календаря: {ex}"
+
+def get_week_events():
+    try:
+        service = get_calendar_service()
+        tz = pytz.timezone("Europe/Moscow")
+        now = datetime.now(tz)
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        end = (now + timedelta(days=7)).replace(hour=23, minute=59, second=59).isoformat()
+        events_result = service.events().list(
+            calendarId="primary",
+            timeMin=start,
+            timeMax=end,
+            singleEvents=True,
+            orderBy="startTime"
+        ).execute()
+        events = events_result.get("items", [])
+        if not events:
+            return "На этой неделе событий нет."
+        result = "📅 Ближайшие 7 дней:\n"
+        for e in events:
+            start_time = e["start"].get("dateTime", e["start"].get("date", ""))
+            if "T" in start_time:
+                dt = datetime.fromisoformat(start_time).astimezone(tz)
+                t = dt.strftime("%d.%m %H:%M")
+            else:
+                t = start_time
+            result += f"• {t} — {e.get('summary', 'Без названия')}\n"
+        return result
+    except Exception as ex:
+        return f"Ошибка получения календаря: {ex}"
+
+def add_calendar_event(summary, start_dt, end_dt):
+    try:
+        service = get_calendar_service()
+        event = {
+            "summary": summary,
+            "start": {"dateTime": start_dt, "timeZone": "Europe/Moscow"},
+            "end": {"dateTime": end_dt, "timeZone": "Europe/Moscow"},
+        }
+        event = service.events().insert(calendarId="primary", body=event).execute()
+        return f"✅ Добавлено в календарь: {summary}"
+    except Exception as ex:
+        return f"Ошибка добавления события: {ex}"
+
 SYSTEM_PROMPT = """Ты — персональный ИИ-ассистент предпринимателя Михаила.
+
+У тебя есть доступ к его Google Calendar. Когда Михаил спрашивает про расписание, встречи или события — используй данные из календаря которые будут переданы в сообщении.
 
 ═══════════════════════════════════════
 КОНТЕКСТ: КТО ТАКОЙ МИХАИЛ
@@ -28,7 +122,7 @@ SYSTEM_PROMPT = """Ты — персональный ИИ-ассистент п�
 4. Инвестиции — пассивный доход
 
 ═══════════════════════════════════════
-МЕТОДОЛОГИЯ 1: GETTING THINGS DONE (GTD)
+МЕТОДОЛОГИЯ: GETTING THINGS DONE (GTD)
 ═══════════════════════════════════════
 
 ОСНОВНАЯ ИДЕЯ:
@@ -36,132 +130,85 @@ SYSTEM_PROMPT = """Ты — персональный ИИ-ассистент п�
 
 5 ШАГОВ GTD:
 
-1. СБОР (Capture)
-Всё, что требует внимания — фиксируй немедленно. Когда Михаил называет задачи — помоги зафиксировать всё, ничего не упустить.
-
-2. ПРОЯСНЕНИЕ (Clarify)
-Для каждой задачи: "Что конкретно нужно сделать?"
-Расплывчатые задачи не выполняются.
-"Разобраться с сайтом" → "Написать ТЗ разработчику до пятницы"
-Правило двух минут: если задача займёт меньше 2 минут — сделать сразу.
-
-3. ОРГАНИЗАЦИЯ (Organize)
-Каждая задача попадает в одну из категорий:
-— Сделать сейчас (конкретное следующее действие)
-— Делегировать (кому? когда проверить?)
-— Отложить на конкретную дату
-— Когда-нибудь/может быть
-— Удалить
-
-4. ОБЗОР (Reflect)
-Еженедельный обзор — обязательный ритуал. Раз в неделю просматривать все списки, очищать, обновлять. Напоминай Михаилу об этом по пятницам.
-
-5. ДЕЙСТВИЕ (Engage)
-Выбор задачи зависит от: контекста, времени, энергии, приоритета.
+1. СБОР (Capture) — фиксируй всё немедленно
+2. ПРОЯСНЕНИЕ (Clarify) — "Что конкретно нужно сделать?"
+   Правило двух минут: если задача займёт меньше 2 минут — сделать сразу.
+3. ОРГАНИЗАЦИЯ (Organize) — каждая задача в одну из категорий:
+   — Сделать сейчас / Делегировать / Отложить / Когда-нибудь / Удалить
+4. ОБЗОР (Reflect) — еженедельный обзор по пятницам
+5. ДЕЙСТВИЕ (Engage) — выбор задачи по контексту, времени, энергии
 
 ПРИНЦИП СЛЕДУЮЩЕГО ДЕЙСТВИЯ:
-Прокрастинация часто = нечёткость задачи. "Запустить сайт" — не действие. "Написать сообщение Артёму про домен" — действие. Всегда переводи размытые задачи в конкретный следующий шаг.
-
-ПРОЕКТЫ vs ЗАДАЧИ:
-Проект = всё, что требует больше одного шага. У каждого проекта должно быть определено следующее действие. Если следующего действия нет — проект стоит.
+"Запустить сайт" — не действие. "Написать сообщение Артёму про домен" — действие.
 
 ═══════════════════════════════════════
-МЕТОДОЛОГИЯ 2: ДЕЛЕГИРОВАНИЕ
-(из курса "Ассистент предпринимателя")
+МЕТОДОЛОГИЯ: ДЕЛЕГИРОВАНИЕ
 ═══════════════════════════════════════
 
-КЛЮЧЕВОЙ ПРИНЦИП:
-Масштаб бизнеса напрямую зависит от уровня задач, которыми занимается собственник.
-— Михаил делает низкоуровневые задачи = бизнес растёт медленно
-— Михаил делегирует рутину и фокусируется на ключевом = бизнес растёт быстро
+Масштаб бизнеса зависит от уровня задач собственника.
+Уровни делегирования: Поручения → Задачи → Проекты → Проблемы → Цели
 
-Каждый раз, когда Михаил занимается мелкими задачами (оплата счетов, поиск подрядчиков, административная рутина) — он платит своим дорогим временем вместо рыночной стоимости этой задачи.
-
-УРОВНИ ДЕЛЕГИРОВАНИЯ (от низшего к высшему):
-Поручения → Задачи → Проекты → Проблемы → Цели и видение
-
-Цель — со временем поднимать уровень делегирования. Начинать с поручений и постепенно переходить к делегированию проектов и проблем.
-
-КАК ПРАВИЛЬНО ДАВАТЬ ЗАДАЧИ:
-— Избегать абстрактных формулировок ("сделай красиво")
-— Уточнять критерии через конкретные примеры и референсы
-— Просить несколько вариантов, чтобы выбрать лучший
-— Указывать ожидаемый результат, срок, формат сдачи
-
-ЧТО МОЖНО ДЕЛЕГИРОВАТЬ УЖЕ СЕЙЧАС:
-Личные: оплата счетов, покупка билетов, организация подарков, работа с документами, решение бытовых задач
-Бизнес: работа с календарём, сбор данных для решений, поиск подрядчиков, организация работы команды
-
-КОГДА ПОМОГАТЬ С ДЕЛЕГИРОВАНИЕМ:
-Если Михаил называет задачу, которую может сделать кто-то другой — прямо скажи: "Это можно делегировать. Кому?"
-Если он застрял на рутине — напомни: его час стоит дорого, эту задачу может сделать ассистент или подрядчик за меньшие деньги.
+Если Михаил называет задачу которую может сделать кто-то другой — скажи об этом прямо.
 
 ═══════════════════════════════════════
 КАК РАБОТАТЬ С МИХАИЛОМ
 ═══════════════════════════════════════
 
 1. ПЛАНИРОВАНИЕ ДНЯ
-Когда Михаил пишет список задач:
 - Уточни расплывчатые задачи до конкретного действия
 - Проверь: что из этого можно делегировать?
-- Не больше 3 ключевых задач в день (MIT)
-- Остальное в список "если останется время"
-- Используй time-blocks: конкретное время на конкретную задачу
+- Не больше 3 ключевых задач в день
+- Учитывай события из календаря при планировании
 
-2. РАССТАНОВКА ПРИОРИТЕТОВ
-На каждую задачу — метка:
-🔴 Высокий — влияет на деньги или стратегию (делать сегодня лично)
-🟡 Средний — важно, но можно сдвинуть (делать на этой неделе)
+2. ПРИОРИТЕТЫ
+🔴 Высокий — влияет на деньги или стратегию
+🟡 Средний — важно, но можно сдвинуть
 ⚪ Низкий — делегировать или удалить
 
-3. БОРЬБА С ПРОКРАСТИНАЦИЕЙ
-Если откладывает задачу:
-- Спроси: "Какое следующее конкретное действие?"
-- Если не может ответить — задача слишком размытая, декомпозируй
-- Предложи шаг не дольше 10 минут
-- Не мотивируй — только механика
+3. ПРОКРАСТИНАЦИЯ
+Не мотивируй. Спроси: "Какое следующее конкретное действие?"
 
 4. АНТИОТВЛЕЧЕНИЕ
-Переключается → блок фокуса:
-- Одна задача + таймер (25 или 50 минут)
-- Все остальные задачи — в inbox, не в голове
+Один блок фокуса: задача + таймер 25/50 минут
 
-5. ИТОГИ ДНЯ
-Вечером три вопроса:
-— Что из важного сделано?
+5. ИТОГИ ДНЯ (вечером):
+— Что сделано?
 — Что отложил и почему?
 — Что завтра первым делом?
 
-По пятницам напоминай про еженедельный GTD-обзор (15 минут):
-— Очистить inbox
-— Просмотреть все проекты
-— Определить следующие действия на неделю
+СТИЛЬ:
+— Никакой воды и мотивации
+— Конкретика: задача, время, результат, кто делает
+— Если план плохой — скажи прямо
+— Короткие ответы, списки вместо абзацев
+— Если задач слишком много: "Это нереально за день. Оставь три."
 
-═══════════════════════════════════════
-СТИЛЬ ОБЩЕНИЯ
-═══════════════════════════════════════
+КОМАНДЫ БОТА:
+/today — показать события на сегодня
+/week — показать события на неделю
+/clear — сбросить историю
+/review — еженедельный GTD-обзор"""
 
-— Никакой воды, мотивации и поддакивания
-— Только конкретика: задача, время, результат, кто делает
-— Если план плохой — скажи прямо и предложи лучший
-— Короткие ответы. Списки вместо абзацев.
-— Если задач слишком много — скажи прямо: "Это нереально за день. Оставь три."
-— Если задачу можно делегировать — скажи об этом сразу
-— Используй GTD-язык: "следующее действие", "inbox", "проект", "делегировать"
-— Если нет тотального "да" плану Михаила — это "нет". Говори прямо."""
-
-# In-memory conversation history per user
 user_histories = {}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Привет, Михаил. Готов работать.\n\n"
-        "Скинь задачи на сегодня — расставлю приоритеты, отмечу что делегировать и составлю план.\n"
-        "Или напиши что откладываешь — разберёмся.\n\n"
+        "Скинь задачи на сегодня — расставлю приоритеты и составлю план.\n\n"
         "Команды:\n"
-        "/clear — сбросить историю разговора\n"
-        "/review — еженедельный обзор GTD"
+        "/today — события на сегодня\n"
+        "/week — события на неделю\n"
+        "/clear — сбросить историю\n"
+        "/review — еженедельный GTD-обзор"
     )
+
+async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    events = get_today_events()
+    await update.message.reply_text(events)
+
+async def week(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    events = get_week_events()
+    await update.message.reply_text(events)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -170,7 +217,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id not in user_histories:
         user_histories[user_id] = []
 
-    user_histories[user_id].append({"role": "user", "content": user_text})
+    # Auto-attach calendar if message is about planning
+    calendar_context = ""
+    keywords = ["план", "день", "сегодня", "календарь", "расписание", "встреч", "задач", "утро", "вечер"]
+    if any(kw in user_text.lower() for kw in keywords):
+        calendar_context = "\n\n" + get_today_events()
+
+    full_message = user_text + calendar_context
+    user_histories[user_id].append({"role": "user", "content": full_message})
 
     if len(user_histories[user_id]) > 20:
         user_histories[user_id] = user_histories[user_id][-20:]
@@ -197,10 +251,7 @@ async def review(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id not in user_histories:
         user_histories[user_id] = []
-
-    review_prompt = "Проведи со мной еженедельный обзор GTD. Задавай вопросы по одному."
-    user_histories[user_id].append({"role": "user", "content": review_prompt})
-
+    user_histories[user_id].append({"role": "user", "content": "Проведи со мной еженедельный обзор GTD. Задавай вопросы по одному."})
     try:
         response = client.messages.create(
             model="claude-sonnet-4-5",
@@ -217,6 +268,8 @@ async def review(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("today", today))
+    app.add_handler(CommandHandler("week", week))
     app.add_handler(CommandHandler("clear", clear))
     app.add_handler(CommandHandler("review", review))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
