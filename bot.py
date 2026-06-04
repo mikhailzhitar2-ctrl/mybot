@@ -566,6 +566,32 @@ TOOLS = [
         }
     },
     {
+        "name": "set_reminder",
+        "description": "Установить напоминание. Используй когда Михаил говорит 'напомни через X', 'напомни в HH:MM', 'напомни завтра в ...'",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "Текст напоминания"},
+                "remind_at": {"type": "string", "description": "Дата и время в формате YYYY-MM-DDTHH:MM:SS по Москве"}
+            },
+            "required": ["text", "remind_at"]
+        }
+    },
+    {
+        "name": "get_reminders",
+        "description": "Показать все активные напоминания.",
+        "input_schema": {"type": "object", "properties": {}}
+    },
+    {
+        "name": "delete_reminder",
+        "description": "Удалить напоминание по id.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"reminder_id": {"type": "string"}},
+            "required": ["reminder_id"]
+        }
+    },
+    {
         "name": "compose_message",
         "description": "Составить сообщение от имени ассистента Михаила Павловича Житарь для отправки другому человеку через Telegram. Используй когда Михаил просит написать/связаться/передать что-то кому-то. ВСЕГДА используй этот инструмент для исходящих сообщений — не пиши текст просто в чат.",
         "input_schema": {
@@ -651,6 +677,42 @@ SYSTEM_PROMPT = (
     "4. Инвестиции — пассивный доход\n\n"
     "GTD: максимум 3 ключевые задачи в день. Если задачу может сделать кто-то другой — скажи прямо.\n"
     "Принцип: не разобраться с сайтом, а написать Артёму про домен.\n\n"
+    "БИОРИТМЫ И ПЛАНИРОВАНИЕ ДНЯ\n"
+    "13:00–17:00 — пик. Только: стратегия, финансы, решения, переговоры, важные встречи, работа с ИИ. НЕ тратить на рутину и переписки.\n"
+    "10:00–13:00 — средняя продуктивность. Созвоны, встречи, контроль команды, подрядчики.\n"
+    "После 18:00 — низкая энергия. Только: семья, спорт, чтение, лёгкая операционка.\n"
+    "Сон: идеально 22:30–23:30, максимум до 00:00. После 00:30 следующий день теряет эффективность.\n"
+    "Спорт: минимум 3 раза в неделю. При высокой загрузке сокращать, но не отменять.\n"
+    "Семья — ключевой приоритет. Каждый день оставлять время на жену и детей. Не забивать календарь полностью работой.\n\n"
+    "ПРИОРИТЕТЫ ЗАДАЧ\n"
+    "1. Рост бизнеса → 2. Новые активы → 3. Рост капитала → 4. Автоматизация → 5. Операционка.\n"
+    "Задача не увеличивает прибыль, активы, здоровье или семью — её приоритет автоматически снижается.\n"
+    "Все задачи должны иметь конкретный результат, дедлайн и измеримый критерий успеха.\n\n"
+    "АНТИПРОКРАСТИНАЦИЯ\n"
+    "Задача < 5 минут — выполнить сразу.\n"
+    "Задача вызывает сопротивление — разбить на первый шаг до 10 минут.\n"
+    "Важная задача откладывается 3+ дня — автоматически поднять приоритет до P1.\n\n"
+    "ИНТЕРЕСЫ И МЫШЛЕНИЕ МИХАИЛА\n"
+    "Главный паттерн: поиск рычагов которые превращают 1 единицу усилий в 10 единиц результата.\n"
+    "Интересы: новые бизнес-модели, анализ рынков, облигации и инвестиции, ИИ в бизнесе, маркетинг и продажи, автоматизация, психология предпринимателей, продуктивность.\n"
+    "Что даёт энергию: рост выручки, рост капитала, закрытие сложных сделок, новые идеи, общение с сильными предпринимателями, видимый прогресс.\n"
+    "Что забирает энергию: бессмысленная операционка, долгие обсуждения без решений, медленные люди, отсутствие прогресса, рутина.\n"
+    "При обсуждении идей — всегда искать масштабируемость и рычаги роста.\n"
+    "При анализе бизнеса — думать через экономику, цифры и точки масштабирования.\n\n"
+    "ТИПИЧНЫЕ ОШИБКИ МИХАИЛА (учитывать при планировании)\n"
+    "- Перегружает день задачами — максимум 3 ключевые, остальное в резерв.\n"
+    "- Начинает много новых направлений одновременно — при новой идее спрашивать: что из текущего готов остановить?\n"
+    "- Недооценивает силу регулярных маленьких действий — напоминать про системность.\n"
+    "- Иногда принимает тревогу за реальную проблему бизнеса — при панике просить описать факты, не ощущения.\n"
+    "- Любит создавать новое больше чем улучшать существующее — сначала докрутить текущее.\n"
+    "- Переключается на интересное вместо важного — при смене задачи спрашивать: важное уже сделано?\n\n"
+    "НАПОМИНАНИЯ\n"
+    "Когда Михаил говорит 'напомни', 'поставь напоминание', 'не забудь' — используй set_reminder.\n"
+    "Примеры:\n"
+    "- 'напомни через 30 минут' → посчитай время и вызови set_reminder\n"
+    "- 'напомни в 18:00 позвонить Артёму' → set_reminder на сегодня 18:00\n"
+    "- 'напомни завтра утром' → set_reminder на завтра 09:00\n"
+    "Всегда подтверждай: 'Напомню в HH:MM — [текст]'\n\n"
     "ПОИСК МЕСТ И АКТИВНОСТЕЙ\n"
     "Когда Михаил просит найти ресторан, кальянную, каток, картинг, тир и т.д.:\n"
     "\n"
@@ -768,6 +830,39 @@ async def process_with_claude(user_id, message_text):
                     result = delete_todoist_task(inp["task_name"])
                 elif n == "update_todoist_task":
                     result = update_todoist_task(inp["task_name"], inp.get("new_content"), inp.get("new_priority"), inp.get("new_due_date"))
+                elif n == "set_reminder":
+                    tz = pytz.timezone("Europe/Moscow")
+                    rid = reminder_add(str(user_id), inp["text"], inp["remind_at"])
+                    # Форматируем время для ответа
+                    try:
+                        dt = datetime.fromisoformat(inp["remind_at"])
+                        if dt.tzinfo is None:
+                            dt = tz.localize(dt)
+                        time_str = dt.strftime("%d.%m в %H:%M")
+                    except:
+                        time_str = inp["remind_at"]
+                    result = f"⏰ Напоминание установлено: {inp['text']} — {time_str}"
+                elif n == "get_reminders":
+                    rems = reminders_get(str(user_id))
+                    active = [r for r in rems if not r.get("done")]
+                    if not active:
+                        result = "Активных напоминаний нет."
+                    else:
+                        tz = pytz.timezone("Europe/Moscow")
+                        lines = []
+                        for r in active:
+                            try:
+                                dt = datetime.fromisoformat(r["remind_at"])
+                                if dt.tzinfo is None:
+                                    dt = tz.localize(dt)
+                                t = dt.strftime("%d.%m в %H:%M")
+                            except:
+                                t = r["remind_at"]
+                            lines.append(f"• {t} — {r['text']} (id:{r['id']})")
+                        result = "⏰ Напоминания:\n" + "\n".join(lines)
+                elif n == "delete_reminder":
+                    reminder_delete(str(user_id), inp["reminder_id"])
+                    result = "✅ Напоминание удалено."
                 elif n == "compose_message":
                     # Claude составил текст — сохраняем черновик
                     pending_messages[user_id] = {
@@ -984,6 +1079,72 @@ async def review(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 OWNER_CHAT_ID = os.environ.get("OWNER_CHAT_ID", "")
 
+# --- НАПОМИНАНИЯ ---
+
+def reminders_get(user_id):
+    """Получить все активные напоминания пользователя."""
+    if not redis_client:
+        return []
+    try:
+        data = redis_client.get(f"reminders:{user_id}")
+        return json.loads(data) if data else []
+    except:
+        return []
+
+def reminders_save(user_id, reminders):
+    if not redis_client:
+        return
+    try:
+        redis_client.set(f"reminders:{user_id}", json.dumps(reminders, ensure_ascii=False))
+    except Exception as e:
+        print(f"[Reminders] save error: {e}")
+
+def reminder_add(user_id, text, remind_at_iso):
+    """Добавить напоминание. remind_at_iso — ISO datetime по Москве."""
+    reminders = reminders_get(user_id)
+    reminder = {
+        "id": str(int(datetime.now().timestamp())),
+        "text": text,
+        "remind_at": remind_at_iso,
+        "done": False
+    }
+    reminders.append(reminder)
+    reminders_save(user_id, reminders)
+    return reminder["id"]
+
+def reminder_delete(user_id, reminder_id):
+    reminders = reminders_get(user_id)
+    reminders = [r for r in reminders if r["id"] != reminder_id]
+    reminders_save(user_id, reminders)
+
+async def check_reminders(bot):
+    """Проверяет напоминания каждую минуту и отправляет если пришло время."""
+    if not OWNER_CHAT_ID:
+        return
+    try:
+        tz = pytz.timezone("Europe/Moscow")
+        now = datetime.now(tz)
+        reminders = reminders_get(OWNER_CHAT_ID)
+        updated = []
+        for r in reminders:
+            if r.get("done"):
+                continue
+            remind_at = datetime.fromisoformat(r["remind_at"])
+            if remind_at.tzinfo is None:
+                remind_at = tz.localize(remind_at)
+            if now >= remind_at:
+                await bot.send_message(
+                    chat_id=OWNER_CHAT_ID,
+                    text=f"⏰ Напоминание: {r['text']}"
+                )
+                r["done"] = True
+            updated.append(r)
+        # Убираем выполненные старше 1 дня
+        updated = [r for r in updated if not r.get("done")]
+        reminders_save(OWNER_CHAT_ID, updated)
+    except Exception as e:
+        print(f"[Reminders] check error: {e}")
+
 async def morning_digest(bot):
     """Утренний дайджест в 9:00 по Москве."""
     if not OWNER_CHAT_ID:
@@ -1031,6 +1192,7 @@ def main():
         minute=0,
         args=[app.bot]
     )
+    scheduler.add_job(check_reminders, trigger="interval", minutes=1, args=[app.bot])
     scheduler.start()
     print("Бот запущен...")
     app.run_polling()
