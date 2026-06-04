@@ -500,6 +500,20 @@ TOOLS = [
         }
     },
     {
+        "name": "compose_message",
+        "description": "Составить сообщение от имени ассистента Михаила Павловича Житарь для отправки другому человеку через Telegram. Используй когда Михаил просит написать/связаться/передать что-то кому-то. ВСЕГДА используй этот инструмент для исходящих сообщений — не пиши текст просто в чат.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "recipient_name": {"type": "string", "description": "Имя получателя (например: Артём, партнёр, клиент)"},
+                "recipient_username": {"type": "string", "description": "Telegram username или номер телефона получателя (например: @artem_username или +79001234567)"},
+                "message_text": {"type": "string", "description": "Полный текст сообщения. Начинай с приветствия и представления: Здравствуйте, меня зовут [имя получателя], я ассистент Михаила Павловича Житарь. Пишу по его поручению."},
+                "message_purpose": {"type": "string", "description": "Краткое описание цели сообщения для отчёта Михаилу"}
+            },
+            "required": ["recipient_name", "recipient_username", "message_text", "message_purpose"]
+        }
+    },
+    {
         "name": "update_todoist_task",
         "description": "Изменить задачу в Todoist.",
         "input_schema": {
@@ -565,10 +579,38 @@ SYSTEM_PROMPT = (
     "3. Тренеры и амбассадоры — долгосрочно\n"
     "4. Инвестиции — пассивный доход\n\n"
     "GTD: максимум 3 ключевые задачи в день. Если задачу может сделать кто-то другой — скажи прямо.\n"
-    "Принцип: не разобраться с сайтом, а написать Артёму про домен."
+    "Принцип: не разобраться с сайтом, а написать Артёму про домен.\n\n"
+    "НАПИСАТЬ СООБЩЕНИЕ ОТ ИМЕНИ МИХАИЛА\n"
+    "Когда Михаил просит написать кому-то — используй инструмент compose_message.\n"
+    "Правила составления сообщений:\n"
+    "1. Представляйся: 'Здравствуйте! Меня зовут [имя], я ассистент Михаила Павловича Житарь.'\n"
+    "2. Тон — вежливый, деловой, конкретный. Без воды.\n"
+    "3. Если цель — договориться о встрече: предложи конкретное время.\n"
+    "4. Если нужно задать вопрос — задай его чётко, один-два максимум.\n"
+    "5. Заканчивай: 'С уважением, ассистент Михаила Житарь'\n"
+    "6. После составления — покажи черновик Михаилу и жди подтверждения.\n"
+    "7. Если Михаил не указал username — спроси: 'На какой username/номер отправлять?'\n"
+    "8. Не отправляй пока Михаил не скажет 'ок' или 'отправляй'."
 )
 
 user_histories = {}
+# Хранит черновики сообщений ожидающих подтверждения
+# {user_id: {"recipient": "@username", "text": "...", "context": "..."}}
+pending_messages = {}
+
+def build_tg_deeplink(username: str, text: str) -> str:
+    """Формирует deeplink который открывает чат с готовым текстом."""
+    import urllib.parse
+    # Убираем @ если есть
+    username = username.lstrip("@")
+    encoded = urllib.parse.quote(text, safe="")
+    return f"https://t.me/{username}?text={encoded}"
+
+def compose_outgoing_message(recipient_name: str, recipient_username: str, context: str) -> str:
+    """Составляет текст сообщения от имени ассистента Михаила."""
+    # Это вызывается из Claude через tool — Claude сам составит текст
+    # Функция просто форматирует финальное сообщение
+    return f"Составляю сообщение для {recipient_name}..."
 
 async def process_with_claude(user_id, message_text):
     if user_id not in user_histories:
@@ -630,6 +672,14 @@ async def process_with_claude(user_id, message_text):
                     result = delete_todoist_task(inp["task_name"])
                 elif n == "update_todoist_task":
                     result = update_todoist_task(inp["task_name"], inp.get("new_content"), inp.get("new_priority"), inp.get("new_due_date"))
+                elif n == "compose_message":
+                    # Claude составил текст — сохраняем черновик
+                    pending_messages[user_id] = {
+                        "recipient_name": inp.get("recipient_name", ""),
+                        "recipient_username": inp.get("recipient_username", ""),
+                        "text": inp["message_text"],
+                    }
+                    result = f"ЧЕРНОВИК_ГОТОВ: {inp['message_text']}"
                 else:
                     result = "Неизвестный инструмент"
                 tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": result})
@@ -673,9 +723,67 @@ async def tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    text = update.message.text.strip().lower()
     try:
+        # Проверяем — есть ли черновик ожидающий подтверждения
+        if user_id in pending_messages:
+            draft = pending_messages[user_id]
+
+            if text in ["ок", "окей", "отправляй", "да", "👍", "хорошо", "отправить", "го"]:
+                # Подтверждено — строим deeplink и отправляем
+                username = draft["recipient_username"].lstrip("@")
+                link = build_tg_deeplink(username, draft["text"])
+                del pending_messages[user_id]
+                await update.message.reply_text(
+                    f"✉️ Открой чат и нажми отправить:",
+                    reply_markup=__import__("telegram").InlineKeyboardMarkup([
+                        [__import__("telegram").InlineKeyboardButton(
+                            f"📨 Написать {draft['recipient_name']}",
+                            url=link
+                        )]
+                    ])
+                )
+                return
+
+            elif text in ["отмена", "нет", "стоп", "cancel"]:
+                del pending_messages[user_id]
+                await update.message.reply_text("Отменено. Черновик удалён.")
+                return
+
+            else:
+                # Михаил правит текст — обновляем черновик
+                edit_prompt = (
+                    f"Михаил хочет изменить черновик сообщения для {draft['recipient_name']}. "
+                    f"Текущий текст: {draft['text']}\n\n"
+                    f"Правка от Михаила: {update.message.text}\n\n"
+                    f"Перепиши сообщение с учётом правки и используй инструмент compose_message."
+                )
+                reply = await process_with_claude(user_id, edit_prompt)
+                # После правки — снова показываем черновик
+                if user_id in pending_messages:
+                    new_draft = pending_messages[user_id]
+                    await update.message.reply_text(
+                        f"✏️ Обновлённый черновик для {new_draft['recipient_name']} (@{new_draft['recipient_username']}):\n\n"
+                        f"{new_draft['text']}\n\n"
+                        f"Отправить? (ок / правь дальше / отмена)"
+                    )
+                else:
+                    await update.message.reply_text(reply)
+                return
+
         reply = await process_with_claude(user_id, update.message.text)
-        await update.message.reply_text(reply)
+
+        # Если Claude использовал compose_message — показываем черновик на согласование
+        if user_id in pending_messages:
+            draft = pending_messages[user_id]
+            await update.message.reply_text(
+                f"✉️ Черновик для {draft['recipient_name']} (@{draft['recipient_username']}):\n\n"
+                f"{draft['text']}\n\n"
+                f"Отправить? (ок / правь / отмена)"
+            )
+        else:
+            await update.message.reply_text(reply)
+
     except Exception as e:
         await update.message.reply_text(f"Ошибка: {e}")
 
