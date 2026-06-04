@@ -53,12 +53,42 @@ def redis_get_history(user_id):
         print(f"[Redis] get_history error: {e}")
         return user_histories.get(user_id, [])
 
+def serialize_history(history):
+    """Конвертирует историю в JSON-сериализуемый формат."""
+    result = []
+    for msg in history:
+        if isinstance(msg.get("content"), str):
+            result.append(msg)
+        elif isinstance(msg.get("content"), list):
+            # Конвертируем tool_use/tool_result блоки
+            serialized_content = []
+            for block in msg["content"]:
+                if hasattr(block, "type"):
+                    if block.type == "text":
+                        serialized_content.append({"type": "text", "text": block.text})
+                    elif block.type == "tool_use":
+                        serialized_content.append({
+                            "type": "tool_use",
+                            "id": block.id,
+                            "name": block.name,
+                            "input": block.input
+                        })
+                    elif block.type == "tool_result":
+                        serialized_content.append(block)
+                elif isinstance(block, dict):
+                    serialized_content.append(block)
+            result.append({"role": msg["role"], "content": serialized_content})
+        else:
+            result.append(msg)
+    return result
+
 def redis_save_history(user_id, history):
     if not redis_client:
         user_histories[user_id] = history
         return
     try:
-        redis_client.setex(f"history:{user_id}", 604800, json.dumps(history[-30:], ensure_ascii=False))
+        serialized = serialize_history(history[-30:])
+        redis_client.setex(f"history:{user_id}", 604800, json.dumps(serialized, ensure_ascii=False))
     except Exception as e:
         print(f"[Redis] save_history error: {e}")
         user_histories[user_id] = history
