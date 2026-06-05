@@ -1234,7 +1234,7 @@ def main():
     scheduler.add_job(check_reminders, trigger="interval", minutes=1, args=[app.bot])
     scheduler.start()
     print("Бот запущен...")
-    app.run_polling()
+    app.run_polling(drop_pending_updates=True, allowed_updates=["message"])
 
 if __name__ == "__main__":
     main()
