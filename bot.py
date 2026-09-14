@@ -123,6 +123,50 @@ def redis_save_memory(user_id, memory_text):
     except Exception as e:
         print(f"[Redis] save_memory error: {e}")
 
+# --- ЦЕЛИ НЕДЕЛИ И ИТОГИ ДНЕЙ ---
+
+def get_week_goals(user_id):
+    if not redis_client:
+        return ""
+    try:
+        return redis_client.get(f"week_goals:{user_id}") or ""
+    except Exception as e:
+        print(f"[Goals] get error: {e}")
+        return ""
+
+def set_week_goals(user_id, text):
+    if not redis_client:
+        return
+    try:
+        redis_client.set(f"week_goals:{user_id}", text)
+    except Exception as e:
+        print(f"[Goals] set error: {e}")
+
+def day_log_add(user_id, text):
+    if not redis_client:
+        return
+    try:
+        tz = pytz.timezone("Europe/Moscow")
+        date = datetime.now(tz).strftime("%Y-%m-%d")
+        data = redis_client.get(f"day_log:{user_id}")
+        log = json.loads(data) if data else []
+        log.append({"date": date, "text": text})
+        log = log[-30:]
+        redis_client.set(f"day_log:{user_id}", json.dumps(log, ensure_ascii=False))
+    except Exception as e:
+        print(f"[Goals] day_log error: {e}")
+
+def day_log_recent_text(user_id, n=7):
+    if not redis_client:
+        return ""
+    try:
+        data = redis_client.get(f"day_log:{user_id}")
+        log = json.loads(data) if data else []
+        return "\n".join(f"{e['date']}: {e['text']}" for e in log[-n:])
+    except Exception:
+        return ""
+
+
 async def extract_and_save_memory(user_id, conversation_summary):
     """Claude выделяет важные факты из разговора и добавляет в память."""
     try:
@@ -674,6 +718,24 @@ TOOLS = [
             },
             "required": ["task_name"]
         }
+    },
+    {
+        "name": "set_week_goals",
+        "description": "Сохранить цели Михаила на текущую неделю. Используй, когда он называет цели недели или подтверждает предложенные в недельном разборе.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"goals": {"type": "string", "description": "2-4 ключевые цели недели, коротко, каждая с новой строки"}},
+            "required": ["goals"]
+        }
+    },
+    {
+        "name": "log_day_result",
+        "description": "Записать краткий итог дня Михаила для трекинга целей и недельного разбора. Используй в вечернем чек-ине после его ответа.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"summary": {"type": "string", "description": "1-2 строки: что сделано по целям, что отложено, вывозит цели недели или нет"}},
+            "required": ["summary"]
+        }
     }
 ]
 
@@ -710,6 +772,15 @@ SYSTEM_PROMPT = """Ты — персональный ИИ-ассистент М�
 - Сон: цель 22:30–23:30, максимум до 00:00.
 - Семья — каждый день. Не забивать календарь работой полностью, оставлять резерв под неожиданное.
 Если план на день это нарушает — скажи.
+
+ТРЕКИНГ ЦЕЛЕЙ (важно)
+У Михаила есть цели на неделю (если заданы — увидишь блок ЦЕЛИ НЕДЕЛИ). Держи его на курсе:
+- Когда Михаил называет цели на неделю — сохрани их через set_week_goals.
+- Каждый вечер короткий чек-ин: 2-3 коротких вопроса по дню (что важного по целям сделал; что отложил; что завтра первым делом). Без воды.
+- По его ответу сразу дай короткий вывод: вывозит цели недели или нет. Запиши итог дня через log_day_result (1-2 строки).
+- Если НЕ вывозит — один короткий вопрос «почему» и сразу конкретная правка плана на остаток недели (что сдвинуть, убрать, добавить). Коротко.
+- В конце недели (воскресенье) — короткий разбор: что смогли, что нет и почему, по пунктам; предложи 2-3 цели на следующую неделю (сохрани через set_week_goals, когда подтвердит).
+- Всё максимально коротко. Длинный разбор — только если сам просит.
 
 ИНСТРУМЕНТЫ: КАЛЕНДАРЬ vs TODOIST
 Календарь = событие, привязанное к времени (встреча, тренировка, поездка). Todoist = задача без конкретного времени (позвонить, написать, сделать).
@@ -821,6 +892,14 @@ async def process_with_claude(user_id, message_text):
     # Загружаем долгосрочную память
     long_memory = redis_get_memory(user_id)
     memory_block = f"\n\nДОЛГОСРОЧНАЯ ПАМЯТЬ (факты о Михаиле из прошлых разговоров):\n{long_memory}" if long_memory else ""
+    # Цели недели и итоги последних дней (для трекинга)
+    week_goals = get_week_goals(user_id)
+    recent_days = day_log_recent_text(user_id, 5)
+    goals_block = ""
+    if week_goals:
+        goals_block += f"\n\nЦЕЛИ НЕДЕЛИ:\n{week_goals}"
+    if recent_days:
+        goals_block += f"\n\nИТОГИ ПОСЛЕДНИХ ДНЕЙ:\n{recent_days}"
 
     calendar_context = ""
     if any(kw in message_text.lower() for kw in ["завтра", "план на завтра"]):
@@ -835,6 +914,8 @@ async def process_with_claude(user_id, message_text):
     system_blocks = [{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}]
     if memory_block:
         system_blocks.append({"type": "text", "text": memory_block})
+    if goals_block:
+        system_blocks.append({"type": "text", "text": goals_block})
 
     response = client.messages.create(
         model="claude-opus-5",
@@ -918,6 +999,12 @@ async def process_with_claude(user_id, message_text):
                         "text": inp["message_text"],
                     }
                     result = f"ЧЕРНОВИК_ГОТОВ: {inp['message_text']}"
+                elif n == "set_week_goals":
+                    set_week_goals(str(user_id), inp["goals"])
+                    result = "✅ Цели недели сохранены."
+                elif n == "log_day_result":
+                    day_log_add(str(user_id), inp["summary"])
+                    result = "Записал итог дня."
                 else:
                     result = "Неизвестный инструмент"
                 tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": result})
@@ -1224,6 +1311,66 @@ async def morning_digest(bot):
     except Exception as e:
         print(f"[Digest] Ошибка: {e}")
 
+async def evening_checkin(bot):
+    """Вечерний чек-ин по целям (21:30 МСК)."""
+    if not OWNER_CHAT_ID:
+        return
+    try:
+        uid = OWNER_CHAT_ID
+        tz = pytz.timezone("Europe/Moscow")
+        today = datetime.now(tz).strftime("%Y-%m-%d")
+        week_goals = get_week_goals(uid)
+        events_text, _ = get_events_for_date(today)
+        ctx = f"Цели недели:\n{week_goals or 'не заданы'}\n\nСобытия сегодня:\n{events_text}"
+        prompt = (
+            "Сейчас вечер. Сделай короткий вечерний чек-ин с Михаилом по итогам дня. "
+            "2-3 коротких вопроса, чтобы понять, вывозит ли он цели недели: что важного по целям сегодня сделал; что отложил; что завтра первым делом. "
+            "Без воды, на «Вы», коротко. Не подводи итог сам — задай вопросы и жди ответа.\n\n" + ctx
+        )
+        resp = client.messages.create(
+            model="claude-opus-5", max_tokens=1024,
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": prompt}],
+            extra_body={"output_config": {"effort": "low"}}
+        )
+        text = next((b.text for b in resp.content if getattr(b, "type", None) == "text"), "")
+        text = remove_markdown(text) if text else "Как прошёл день? Что из важного по целям недели сделали, что отложили, что завтра первым делом?"
+        await bot.send_message(chat_id=uid, text=text)
+        hist = sanitize_history_head(redis_get_history(uid))
+        hist.append({"role": "assistant", "content": text})
+        redis_save_history(uid, hist)
+    except Exception as e:
+        print(f"[Evening] error: {e}")
+
+async def weekly_review(bot):
+    """Недельный разбор целей (воскресенье 20:00 МСК)."""
+    if not OWNER_CHAT_ID:
+        return
+    try:
+        uid = OWNER_CHAT_ID
+        week_goals = get_week_goals(uid)
+        days = day_log_recent_text(uid, 7)
+        ctx = f"Цели недели:\n{week_goals or 'не заданы'}\n\nИтоги дней за неделю:\n{days or 'нет записей'}"
+        prompt = (
+            "Конец недели, воскресенье. Сделай короткий недельный разбор для Михаила: "
+            "что из целей недели смогли, что нет и почему — коротко, по пунктам. "
+            "Потом предложи 2-3 цели на следующую неделю. На «Вы», без воды. Просто предложи цели — сохранит их отдельный шаг, когда Михаил подтвердит.\n\n" + ctx
+        )
+        resp = client.messages.create(
+            model="claude-opus-5", max_tokens=1500,
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": prompt}],
+            extra_body={"output_config": {"effort": "medium"}}
+        )
+        text = next((b.text for b in resp.content if getattr(b, "type", None) == "text"), "")
+        text = remove_markdown(text) if text else "Недельный разбор: что из целей недели удалось, а что нет и почему?"
+        await bot.send_message(chat_id=uid, text=text)
+        hist = sanitize_history_head(redis_get_history(uid))
+        hist.append({"role": "assistant", "content": text})
+        redis_save_history(uid, hist)
+    except Exception as e:
+        print(f"[Weekly] error: {e}")
+
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
@@ -1248,6 +1395,8 @@ def main():
         args=[app.bot]
     )
     scheduler.add_job(check_reminders, trigger="interval", minutes=1, args=[app.bot])
+    scheduler.add_job(evening_checkin, trigger="cron", hour=21, minute=30, args=[app.bot])
+    scheduler.add_job(weekly_review, trigger="cron", day_of_week="sun", hour=20, minute=0, args=[app.bot])
     scheduler.start()
     print("Бот запущен...")
     app.run_polling(drop_pending_updates=True, allowed_updates=["message"])
