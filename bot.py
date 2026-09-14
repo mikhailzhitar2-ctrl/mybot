@@ -919,11 +919,11 @@ async def process_with_claude(user_id, message_text):
 
     response = client.messages.create(
         model="claude-opus-5",
-        max_tokens=8192,
+        max_tokens=16000,
         system=system_blocks,
         tools=TOOLS,
         messages=history,
-        extra_body={"output_config": {"effort": "medium"}}
+        extra_body={"output_config": {"effort": "low"}}
     )
 
     tools_used = False
@@ -1012,10 +1012,10 @@ async def process_with_claude(user_id, message_text):
         history.append({"role": "assistant", "content": response.content})
         history.append({"role": "user", "content": tool_results})
         response = client.messages.create(
-            model="claude-opus-5", max_tokens=8192,
+            model="claude-opus-5", max_tokens=16000,
             system=system_blocks, tools=TOOLS,
             messages=history,
-            extra_body={"output_config": {"effort": "medium"}}
+            extra_body={"output_config": {"effort": "low"}}
         )
 
     # Берём первый текстовый блок (могут быть tool_use блоки)
@@ -1024,6 +1024,8 @@ async def process_with_claude(user_id, message_text):
         reply = remove_markdown(reply_text)
     elif tools_used:
         reply = "Готово."
+    elif getattr(response, "stop_reason", None) == "max_tokens":
+        reply = "Задача объёмная — не уместил за один раз. Пришлите её частями (например, сначала цели, потом события по дням), и я всё внесу."
     else:
         reply = "Не понял задачу — уточни, что нужно сделать?"
     history.append({"role": "assistant", "content": reply})
@@ -1360,7 +1362,7 @@ async def weekly_review(bot):
             model="claude-opus-5", max_tokens=1500,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
-            extra_body={"output_config": {"effort": "medium"}}
+            extra_body={"output_config": {"effort": "low"}}
         )
         text = next((b.text for b in resp.content if getattr(b, "type", None) == "text"), "")
         text = remove_markdown(text) if text else "Недельный разбор: что из целей недели удалось, а что нет и почему?"
