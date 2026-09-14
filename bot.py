@@ -340,9 +340,17 @@ TODOIST_HEADERS = {"Authorization": f"Bearer {TODOIST_API_KEY}"}
 PRIORITY_MAP = {"p1": 4, "p2": 3, "p3": 2, "p4": 1}
 PRIORITY_EMOJI = {4: "🔴", 3: "🟠", 2: "🔵", 1: "⚪"}
 
+def _fetch_todoist_tasks():
+    # Todoist перешёл на постраничный ответ {"results": [...], "next_cursor": ...}.
+    # Раньше приходил просто список задач. Распаковываем, если пришёл словарь.
+    data = httpx.get(f"{TODOIST_BASE}/tasks", headers=TODOIST_HEADERS, timeout=10).json()
+    if isinstance(data, dict):
+        return data.get("results", [])
+    return data
+
 def get_todoist_tasks():
     try:
-        tasks = httpx.get(f"{TODOIST_BASE}/tasks", headers=TODOIST_HEADERS, timeout=10).json()
+        tasks = _fetch_todoist_tasks()
         if not tasks:
             return "В Todoist задач нет."
         text = "📋 Задачи:\n"
@@ -384,7 +392,7 @@ def find_todoist_task(tasks, task_name):
 
 def complete_todoist_task(task_name):
     try:
-        tasks = httpx.get(f"{TODOIST_BASE}/tasks", headers=TODOIST_HEADERS, timeout=10).json()
+        tasks = _fetch_todoist_tasks()
         t = find_todoist_task(tasks, task_name)
         if t is None:
             return f"Задача не найдена: {task_name}"
@@ -397,7 +405,7 @@ def complete_todoist_task(task_name):
 
 def delete_todoist_task(task_name):
     try:
-        tasks = httpx.get(f"{TODOIST_BASE}/tasks", headers=TODOIST_HEADERS, timeout=10).json()
+        tasks = _fetch_todoist_tasks()
         t = find_todoist_task(tasks, task_name)
         if t is None:
             return f"Задача не найдена: {task_name}"
@@ -410,7 +418,7 @@ def delete_todoist_task(task_name):
 
 def update_todoist_task(task_name, new_content=None, new_priority=None, new_due_date=None):
     try:
-        tasks = httpx.get(f"{TODOIST_BASE}/tasks", headers=TODOIST_HEADERS, timeout=10).json()
+        tasks = _fetch_todoist_tasks()
         t = find_todoist_task(tasks, task_name)
         if t is None:
             return f"Задача не найдена: {task_name}"
