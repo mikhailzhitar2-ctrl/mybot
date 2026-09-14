@@ -831,14 +831,18 @@ async def process_with_claude(user_id, message_text):
     full_msg = f"{message_text}\n\n[Сегодня: {today_date} ({weekdays[now.weekday()]}). Завтра: {tomorrow_date}]{calendar_context}"
     history.append({"role": "user", "content": full_msg})
 
-    system_with_memory = SYSTEM_PROMPT + memory_block
+    # Профиль кэшируется (не платим за него каждый раз); память — отдельным блоком после кэша
+    system_blocks = [{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}]
+    if memory_block:
+        system_blocks.append({"type": "text", "text": memory_block})
 
     response = client.messages.create(
-        model="claude-sonnet-4-5",
-        max_tokens=2000,
-        system=system_with_memory,
+        model="claude-opus-5",
+        max_tokens=8192,
+        system=system_blocks,
         tools=TOOLS,
-        messages=history
+        messages=history,
+        extra_body={"output_config": {"effort": "medium"}}
     )
 
     tools_used = False
@@ -921,9 +925,10 @@ async def process_with_claude(user_id, message_text):
         history.append({"role": "assistant", "content": response.content})
         history.append({"role": "user", "content": tool_results})
         response = client.messages.create(
-            model="claude-sonnet-4-5", max_tokens=2000,
-            system=system_with_memory, tools=TOOLS,
-            messages=history
+            model="claude-opus-5", max_tokens=8192,
+            system=system_blocks, tools=TOOLS,
+            messages=history,
+            extra_body={"output_config": {"effort": "medium"}}
         )
 
     # Берём первый текстовый блок (могут быть tool_use блоки)
