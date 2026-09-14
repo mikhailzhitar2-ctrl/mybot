@@ -82,12 +82,24 @@ def serialize_history(history):
             result.append(msg)
     return result
 
+def sanitize_history_head(msgs):
+    """История должна начинаться с обычного текстового сообщения пользователя.
+    Иначе (если в начале болтается tool_result без пары tool_use, или assistant-
+    ход) Anthropic API отклоняет весь запрос с 400 'unexpected tool_use_id'.
+    Такое бывает после обрезки истории посреди пары «инструмент → результат»."""
+    while msgs:
+        m = msgs[0]
+        if m.get("role") == "user" and isinstance(m.get("content"), str):
+            break
+        msgs = msgs[1:]
+    return msgs
+
 def redis_save_history(user_id, history):
     if not redis_client:
         user_histories[user_id] = history
         return
     try:
-        serialized = serialize_history(history[-30:])
+        serialized = sanitize_history_head(serialize_history(history[-30:]))
         redis_client.setex(f"history:{user_id}", 604800, json.dumps(serialized, ensure_ascii=False))
     except Exception as e:
         print(f"[Redis] save_history error: {e}")
@@ -819,8 +831,8 @@ async def process_with_claude(user_id, message_text):
     tomorrow_date = (now + timedelta(days=1)).strftime("%Y-%m-%d")
     weekdays = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
 
-    # Загружаем историю из Redis
-    history = redis_get_history(user_id)
+    # Загружаем историю из Redis (и чистим начало, если оно испорчено)
+    history = sanitize_history_head(redis_get_history(user_id))
 
     # Загружаем долгосрочную память
     long_memory = redis_get_memory(user_id)
@@ -845,7 +857,9 @@ async def process_with_claude(user_id, message_text):
         messages=history
     )
 
+    tools_used = False
     while response.stop_reason == "tool_use":
+        tools_used = True
         tool_results = []
         for block in response.content:
             if block.type == "tool_use":
@@ -929,8 +943,13 @@ async def process_with_claude(user_id, message_text):
         )
 
     # Берём первый текстовый блок (могут быть tool_use блоки)
-    reply_text = next((b.text for b in response.content if hasattr(b, "text")), "")
-    reply = remove_markdown(reply_text) if reply_text else "Готово."
+    reply_text = next((b.text for b in response.content if getattr(b, "type", None) == "text"), "")
+    if reply_text:
+        reply = remove_markdown(reply_text)
+    elif tools_used:
+        reply = "Готово."
+    else:
+        reply = "Не понял задачу — уточни, что нужно сделать?"
     history.append({"role": "assistant", "content": reply})
 
     # Сохраняем историю в Redis
